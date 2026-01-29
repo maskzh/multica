@@ -38,6 +38,9 @@ importers:
       '@sinclair/typebox':
         specifier: ^0.34.41
         version: 0.34.48
+      fast-glob:
+        specifier: ^3.3.3
+        version: 3.3.3
       nestjs-pino:
         specifier: ^4.5.0
         version: 4.5.0(@nestjs/common@11.1.12(reflect-metadata@0.2.2)(rxjs@7.8.2))(pino-http@11.0.0)(pino@10.3.0)(rxjs@7.8.2)

@@ -4,6 +4,7 @@ import { createCodingTools } from "@mariozechner/pi-coding-agent";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { createExecTool } from "./tools/exec.js";
 import { createProcessTool } from "./tools/process.js";
+import { createGlobTool } from "./tools/glob.js";
 
 export function resolveModel(options: AgentOptions) {
   if (options.provider && options.model) {
@@ -21,5 +22,6 @@ export function resolveTools(options: AgentOptions): AgentTool<any>[] {
   const baseTools = createCodingTools(cwd).filter((tool) => tool.name !== "bash") as AgentTool<any>[];
   const execTool = createExecTool(cwd);
   const processTool = createProcessTool(cwd);
-  return [...baseTools, execTool as AgentTool<any>, processTool as AgentTool<any>];
+  const globTool = createGlobTool(cwd);
+  return [...baseTools, execTool as AgentTool<any>, processTool as AgentTool<any>, globTool as AgentTool<any>];
 }
