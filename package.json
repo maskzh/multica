@@ -16,6 +16,7 @@
     "agent:interactive": "tsx --env-file=.env src/agent/interactive-cli.ts",
     "agent:profile": "tsx --env-file=.env src/agent/profile-cli.ts",
     "skills:cli": "tsx --env-file=.env src/agent/skills-cli.ts",
+    "tools:cli": "tsx --env-file=.env src/agent/tools-cli.ts",
     "dev:gateway": "tsx --env-file=.env --watch src/gateway/main.ts",
     "dev:console": "tsx --env-file=.env --watch src/console/main.ts",
     "dev:web": "pnpm --filter @multica/web dev",
