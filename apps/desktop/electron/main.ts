@@ -1,6 +1,7 @@
 import { app, BrowserWindow } from 'electron'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+import { registerAllIpcHandlers, initializeApp, cleanupAll } from './ipc/index.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -16,15 +17,19 @@ let win: BrowserWindow | null
 
 function createWindow() {
   win = new BrowserWindow({
+    width: 1200,
+    height: 800,
     webPreferences: {
       preload: path.join(__dirname, 'preload.mjs'),
+      // Enable node integration for IPC
+      contextIsolation: true,
+      nodeIntegration: false,
     },
   })
 
   if (VITE_DEV_SERVER_URL) {
     win.loadURL(VITE_DEV_SERVER_URL)
   } else {
-    // win.loadFile('dist/index.html')
     win.loadFile(path.join(RENDERER_DIST, 'index.html'))
   }
 }
@@ -42,4 +47,16 @@ app.on('activate', () => {
   }
 })
 
-app.whenReady().then(createWindow)
+app.on('before-quit', () => {
+  cleanupAll()
+})
+
+app.whenReady().then(async () => {
+  // Register all IPC handlers before creating window
+  registerAllIpcHandlers()
+
+  // Initialize Hub and create default agent
+  await initializeApp()
+
+  createWindow()
+})
