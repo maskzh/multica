@@ -143,7 +143,7 @@ export default function ConnectStep() {
                 Skip
               </Button>
             )}
-            <Button size="lg" onClick={handleContinue}>
+            <Button size="lg" onClick={handleContinue} disabled={!isRunning}>
               Continue
             </Button>
           </div>
