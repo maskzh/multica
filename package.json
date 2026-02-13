@@ -11,7 +11,7 @@
   "scripts": {
     "multica": "pnpm --filter @multica/cli dev",
     "mu": "pnpm --filter @multica/cli dev",
-    "dev": "GATEWAY_URL=https://multica-dev.copilothub.ai/ pnpm --filter @multica/desktop dev",
+    "dev": "turbo build --filter=@multica/types --filter=@multica/utils --filter=@multica/core && concurrently -n types,utils,core,desktop -c blue,green,yellow,cyan \"pnpm --filter @multica/types dev\" \"pnpm --filter @multica/utils dev\" \"pnpm --filter @multica/core dev\" \"GATEWAY_URL=https://multica-dev.copilothub.ai/ pnpm --filter @multica/desktop dev\"",
     "dev:desktop": "GATEWAY_URL=https://multica-dev.copilothub.ai/ pnpm --filter @multica/desktop dev",
     "dev:desktop:reset": "rm -rf ~/.super-multica && echo '✓ Deleted ~/.super-multica - Fresh install state restored'",
     "dev:desktop:fresh": "pnpm dev:desktop:reset && pnpm dev:desktop",

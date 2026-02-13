@@ -53,6 +53,21 @@ pnpm dev:all         # Start both Gateway and Web app
 
 The Desktop app runs a standalone Hub with embedded Agent Engine - no Gateway required for local use.
 
+### Monorepo Development
+
+| Command | Purpose |
+|---------|---------|
+| `pnpm dev` | Full dev mode — watches `core`, `types`, `utils` packages |
+| `pnpm dev:desktop` | Desktop only — skip package watching |
+
+**When modifying packages:**
+
+1. Edit code in `packages/core`, `packages/types`, or `packages/utils`
+2. Terminal shows `[core] ESM ⚡️ Build success` (~100ms)
+3. Restart Desktop to apply changes (Ctrl+C, then `pnpm dev`)
+
+> **Why restart?** Electron main process does not support hot reload — this is an Electron limitation, not ours.
+
 ### Credentials
 
 ```bash
