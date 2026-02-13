@@ -4,6 +4,7 @@ import "@multica/ui/globals.css";
 import { ThemeProvider } from "@multica/ui/components/theme-provider";
 import { Toaster } from "@multica/ui/components/ui/sonner";
 import { ServiceWorkerRegister } from "./sw-register";
+import { Providers } from "./providers";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-sans" });
 
@@ -41,14 +42,16 @@ export default function RootLayout({
       <body
         className={`${geistMono.variable} ${playfair.variable} font-sans antialiased h-dvh flex flex-col`}
       >
-        <ThemeProvider
-          attribute="class"
-          defaultTheme="system"
-          enableSystem
-          disableTransitionOnChange
-        >
-          <div className="h-dvh overflow-hidden">{children}</div>
-        </ThemeProvider>
+        <Providers>
+          <ThemeProvider
+            attribute="class"
+            defaultTheme="system"
+            enableSystem
+            disableTransitionOnChange
+          >
+            <div className="h-dvh overflow-hidden">{children}</div>
+          </ThemeProvider>
+        </Providers>
         <Toaster />
         <ServiceWorkerRegister />
       </body>

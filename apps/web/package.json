@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --port 3001 --experimental-https",
+    "dev": "next dev --port 3000",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"
@@ -13,6 +13,7 @@
     "@multica/sdk": "workspace:*",
     "@multica/store": "workspace:*",
     "@multica/ui": "workspace:*",
+    "@react-oauth/google": "^0.12.1",
     "next": "16.1.6",
     "next-themes": "^0.4.6",
     "react": "catalog:",
