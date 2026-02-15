@@ -126,19 +126,20 @@ export function createSessionsSpawnTool(
       const runId = uuidv7();
       const childSessionId = uuidv7();
 
-      // Validate groupId if provided
+      // Auto-create group when groupId is provided but doesn't exist yet,
+      // or when `next` is provided without a groupId.
       if (groupId) {
         const existingGroup = getSubagentGroup(groupId);
         if (!existingGroup) {
-          return {
-            content: [{ type: "text", text: `Error: group not found: ${groupId}. Use the groupId returned by a previous sessions_spawn call.` }],
-            details: { status: "error", error: `group not found: ${groupId}` },
-          };
+          // LLM provided a custom groupId — auto-create the group
+          createSubagentGroup({
+            groupId,
+            requesterSessionId,
+            label: label ? `Group: ${label}` : undefined,
+            next,
+          });
         }
-      }
-
-      // Auto-create group when `next` is provided without an existing groupId
-      if (!groupId && next) {
+      } else if (next) {
         groupId = uuidv7();
         createSubagentGroup({
           groupId,
