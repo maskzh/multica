@@ -8,7 +8,6 @@ import { MessageList } from "@multica/ui/components/message-list";
 import { MemoizedMarkdown } from "@multica/ui/components/markdown";
 import { MulticaIcon } from "@multica/ui/components/multica-icon";
 import { ExecApprovalItem } from "@multica/ui/components/exec-approval-item";
-import { LoadingIndicator } from "@multica/ui/components/loading-indicator";
 import { useScrollFade } from "@multica/ui/hooks/use-scroll-fade";
 import { useAutoScroll } from "@multica/ui/hooks/use-auto-scroll";
 import type { Message } from "@multica/store";
@@ -209,14 +208,12 @@ export function ChatView({
                 </div>
               </div>
             )}
-            <MessageList messages={messages} streamingIds={streamingIds} />
-            {isLoading && pendingApprovals.length === 0 && (
-              <div className="container relative px-6">
-                <LoadingIndicator
-                  variant={streamingIds.size > 0 ? "streaming" : "generating"}
-                />
-              </div>
-            )}
+            <MessageList
+              messages={messages}
+              streamingIds={streamingIds}
+              isLoading={isLoading}
+              hasPendingApprovals={pendingApprovals.length > 0}
+            />
             {pendingApprovals.length > 0 && (
               <div className="container relative px-4">
                 {pendingApprovals.map((approval) => (

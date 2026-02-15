@@ -7,6 +7,7 @@ import { ToolCallItem } from "@multica/ui/components/tool-call-item";
 import { ThinkingItem } from "@multica/ui/components/thinking-item";
 import { CompactionItem } from "@multica/ui/components/compaction-item";
 import { MessageSourceIcon } from "@multica/ui/components/message-source-icon";
+import { LoadingIndicator } from "@multica/ui/components/loading-indicator";
 import { cn, getTextContent } from "@multica/ui/lib/utils";
 import type { Message } from "@multica/store";
 import type { ContentBlock, ToolCall, ThinkingContent } from "@multica/sdk";
@@ -62,9 +63,16 @@ function toRunningMessage(tc: ToolCall, agentId: string): Message {
 interface MessageListProps {
   messages: Message[]
   streamingIds: Set<string>
+  isLoading?: boolean
+  hasPendingApprovals?: boolean
 }
 
-export const MessageList = memo(function MessageList({ messages, streamingIds }: MessageListProps) {
+export const MessageList = memo(function MessageList({
+  messages,
+  streamingIds,
+  isLoading = false,
+  hasPendingApprovals = false,
+}: MessageListProps) {
   // Build a set of toolCallIds that already have a toolResult message,
   // so we don't render duplicate items from the assistant's toolCall blocks
   const resolvedToolCallIds = useMemo(() => {
@@ -125,7 +133,7 @@ export const MessageList = memo(function MessageList({ messages, streamingIds }:
                 )}
                 <div
                   className={cn(
-                    msg.role === "user" ? "bg-muted rounded-md max-w-[60%] p-2 px-4" : "w-full p-2 my-1"
+                    msg.role === "user" ? "bg-muted rounded-md max-w-[60%] p-2 px-4 my-2" : "w-full p-2 my-2"
                   )}
                 >
                   {isStreaming ? (
@@ -155,6 +163,12 @@ export const MessageList = memo(function MessageList({ messages, streamingIds }:
           </div>
         )
       })}
+      {isLoading && !hasPendingApprovals && (
+        <LoadingIndicator
+          variant={streamingIds.size > 0 ? "streaming" : "generating"}
+          className="px-2"
+        />
+      )}
     </div>
   )
 })
