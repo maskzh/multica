@@ -13,6 +13,7 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/realtime"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 func main() {
@@ -43,6 +44,9 @@ func main() {
 	hub := realtime.NewHub()
 	go hub.Run()
 	registerListeners(bus, hub)
+
+	queries := db.New(pool)
+	registerInboxListeners(bus, queries)
 
 	r := NewRouter(pool, hub, bus)
 

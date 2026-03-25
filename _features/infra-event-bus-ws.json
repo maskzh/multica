@@ -31,8 +31,8 @@
     },
     {
       "task": "Backend: Register event listeners for inbox creation",
-      "done": false,
-      "scope": "Deferred: inbox creation stays in handlers/TaskService for now. Will extract to bus listeners when adding new notification triggers (inbox-notifications feature)."
+      "done": true,
+      "scope": "Inbox creation extracted to server/cmd/server/inbox_listeners.go. Listeners for issue:created, issue:updated, comment:created create inbox items and publish inbox:new. Handlers enriched with change context in payloads."
     },
     {
       "task": "Backend: Refactor handlers to publish events instead of direct broadcast/inbox",

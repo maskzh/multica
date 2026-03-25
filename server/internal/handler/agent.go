@@ -123,7 +123,8 @@ func taskToResponse(t db.AgentTaskQueue) AgentTaskResponse {
 
 func (h *Handler) ListAgents(w http.ResponseWriter, r *http.Request) {
 	workspaceID := resolveWorkspaceID(r)
-	if _, ok := h.requireWorkspaceMember(w, r, workspaceID, "workspace not found"); !ok {
+	member, ok := h.requireWorkspaceMember(w, r, workspaceID, "workspace not found")
+	if !ok {
 		return
 	}
 
@@ -133,12 +134,22 @@ func (h *Handler) ListAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := make([]AgentResponse, len(agents))
-	for i, a := range agents {
-		resp[i] = agentToResponse(a)
+	userID := requestUserID(r)
+	isAdmin := roleAllowed(member.Role, "owner", "admin")
+
+	// Filter private agents: only visible to owner_id or workspace admin
+	var visible []AgentResponse
+	for _, a := range agents {
+		if a.Visibility == "private" && !isAdmin && uuidToString(a.OwnerID) != userID {
+			continue
+		}
+		visible = append(visible, agentToResponse(a))
+	}
+	if visible == nil {
+		visible = []AgentResponse{}
 	}
 
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, visible)
 }
 
 func (h *Handler) GetAgent(w http.ResponseWriter, r *http.Request) {

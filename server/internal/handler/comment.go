@@ -98,27 +98,12 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := commentToResponse(comment)
-	h.publish(protocol.EventCommentCreated, uuidToString(issue.WorkspaceID), "member", userID, map[string]any{"comment": resp})
-
-	// Notify issue assignee about new comment (if assignee is a member and != commenter)
-	if issue.AssigneeType.Valid && issue.AssigneeID.Valid &&
-		issue.AssigneeType.String == "member" && uuidToString(issue.AssigneeID) != userID {
-		body := req.Content
-		inboxItem, inboxErr := h.Queries.CreateInboxItem(r.Context(), db.CreateInboxItemParams{
-			WorkspaceID:   issue.WorkspaceID,
-			RecipientType: "member",
-			RecipientID:   issue.AssigneeID,
-			Type:          "mentioned",
-			Severity:      "info",
-			IssueID:       issue.ID,
-			Title:         "New comment on: " + issue.Title,
-			Body:          ptrToText(&body),
-		})
-		if inboxErr == nil {
-			h.publish(protocol.EventInboxNew, uuidToString(issue.WorkspaceID), "member", userID,
-				map[string]any{"item": inboxToResponse(inboxItem)})
-		}
-	}
+	h.publish(protocol.EventCommentCreated, uuidToString(issue.WorkspaceID), "member", userID, map[string]any{
+		"comment":              resp,
+		"issue_title":          issue.Title,
+		"issue_assignee_type":  textToPtr(issue.AssigneeType),
+		"issue_assignee_id":    uuidToPtr(issue.AssigneeID),
+	})
 
 	writeJSON(w, http.StatusCreated, resp)
 }

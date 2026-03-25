@@ -236,23 +236,8 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 	resp := issueToResponse(issue)
 	h.publish(protocol.EventIssueCreated, workspaceID, "member", creatorID, map[string]any{"issue": resp})
 
-	// Create inbox notification for assignee
+	// Only ready issues in todo are enqueued for agents.
 	if issue.AssigneeType.Valid && issue.AssigneeID.Valid {
-		inboxItem, err := h.Queries.CreateInboxItem(r.Context(), db.CreateInboxItemParams{
-			WorkspaceID:   issue.WorkspaceID,
-			RecipientType: issue.AssigneeType.String,
-			RecipientID:   issue.AssigneeID,
-			Type:          "issue_assigned",
-			Severity:      "action_required",
-			IssueID:       issue.ID,
-			Title:         "New issue assigned: " + issue.Title,
-			Body:          ptrToText(req.Description),
-		})
-		if err == nil {
-			h.publish(protocol.EventInboxNew, workspaceID, "member", creatorID, map[string]any{"item": inboxToResponse(inboxItem)})
-		}
-
-		// Only ready issues in todo are enqueued for agents.
 		if h.shouldEnqueueAgentTask(r.Context(), issue) {
 			h.TaskService.EnqueueTaskForIssue(r.Context(), issue)
 		}
@@ -368,11 +353,21 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := issueToResponse(issue)
-	h.publish(protocol.EventIssueUpdated, workspaceID, "member", userID, map[string]any{"issue": resp})
 
 	assigneeChanged := (req.AssigneeType != nil || req.AssigneeID != nil) &&
 		(prevIssue.AssigneeType.String != issue.AssigneeType.String || uuidToString(prevIssue.AssigneeID) != uuidToString(issue.AssigneeID))
 	statusChanged := req.Status != nil && prevIssue.Status != issue.Status
+
+	h.publish(protocol.EventIssueUpdated, workspaceID, "member", userID, map[string]any{
+		"issue":              resp,
+		"assignee_changed":   assigneeChanged,
+		"status_changed":     statusChanged,
+		"prev_assignee_type": textToPtr(prevIssue.AssigneeType),
+		"prev_assignee_id":   uuidToPtr(prevIssue.AssigneeID),
+		"prev_status":        prevIssue.Status,
+		"creator_type":       prevIssue.CreatorType,
+		"creator_id":         uuidToString(prevIssue.CreatorID),
+	})
 
 	// If assignee or readiness status changed, reconcile the task queue.
 	if assigneeChanged || statusChanged {
@@ -380,84 +375,6 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 
 		if h.shouldEnqueueAgentTask(r.Context(), issue) {
 			h.TaskService.EnqueueTaskForIssue(r.Context(), issue)
-		}
-	}
-
-	// If assignee changed, create a notification for the new assignee.
-	if assigneeChanged {
-		// Notify old assignee about unassignment
-		if prevIssue.AssigneeID.Valid && prevIssue.AssigneeType.Valid &&
-			prevIssue.AssigneeType.String == "member" && uuidToString(prevIssue.AssigneeID) != userID {
-			oldInbox, oErr := h.Queries.CreateInboxItem(r.Context(), db.CreateInboxItemParams{
-				WorkspaceID:   prevIssue.WorkspaceID,
-				RecipientType: "member",
-				RecipientID:   prevIssue.AssigneeID,
-				Type:          "status_change",
-				Severity:      "info",
-				IssueID:       prevIssue.ID,
-				Title:         "Unassigned from: " + issue.Title,
-				Body:          ptrToText(nil),
-			})
-			if oErr == nil {
-				h.publish(protocol.EventInboxNew, workspaceID, "member", userID,
-					map[string]any{"item": inboxToResponse(oldInbox)})
-			}
-		}
-
-		// Create inbox notification for new assignee
-		if issue.AssigneeType.Valid && issue.AssigneeID.Valid {
-			inboxItem, err := h.Queries.CreateInboxItem(r.Context(), db.CreateInboxItemParams{
-				WorkspaceID:   issue.WorkspaceID,
-				RecipientType: issue.AssigneeType.String,
-				RecipientID:   issue.AssigneeID,
-				Type:          "issue_assigned",
-				Severity:      "action_required",
-				IssueID:       issue.ID,
-				Title:         "Assigned to you: " + issue.Title,
-			})
-			if err == nil {
-				h.publish(protocol.EventInboxNew, workspaceID, "member", userID, map[string]any{"item": inboxToResponse(inboxItem)})
-			}
-		}
-	}
-
-	// If status changed, create a notification
-	if req.Status != nil {
-		if issue.AssigneeType.Valid && issue.AssigneeID.Valid {
-			inboxItem, err := h.Queries.CreateInboxItem(r.Context(), db.CreateInboxItemParams{
-				WorkspaceID:   issue.WorkspaceID,
-				RecipientType: issue.AssigneeType.String,
-				RecipientID:   issue.AssigneeID,
-				Type:          "status_change",
-				Severity:      "info",
-				IssueID:       issue.ID,
-				Title:         issue.Title + " moved to " + *req.Status,
-			})
-			if err == nil {
-				h.publish(protocol.EventInboxNew, workspaceID, "member", userID, map[string]any{"item": inboxToResponse(inboxItem)})
-			}
-		}
-
-		// Notify creator about status change (if creator is member and != the person making change)
-		if prevIssue.CreatorType == "member" && uuidToString(prevIssue.CreatorID) != userID {
-			// Don't double-notify if creator is also the assignee
-			isAlsoAssignee := prevIssue.AssigneeID.Valid && uuidToString(prevIssue.AssigneeID) == uuidToString(prevIssue.CreatorID)
-			if !isAlsoAssignee {
-				creatorInbox, cErr := h.Queries.CreateInboxItem(r.Context(), db.CreateInboxItemParams{
-					WorkspaceID:   prevIssue.WorkspaceID,
-					RecipientType: "member",
-					RecipientID:   prevIssue.CreatorID,
-					Type:          "status_change",
-					Severity:      "info",
-					IssueID:       prevIssue.ID,
-					Title:         "Status changed: " + issue.Title,
-					Body:          ptrToText(nil),
-				})
-				if cErr == nil {
-					h.publish(protocol.EventInboxNew, workspaceID, "member", userID,
-						map[string]any{"item": inboxToResponse(creatorInbox)})
-				}
-			}
 		}
 	}
 

@@ -33,8 +33,8 @@
     },
     {
       "task": "Backend: Agent visibility filtering",
-      "done": false,
-      "scope": "Deferred: all agents are workspace-visible for MVP. Private agent filtering not needed yet."
+      "done": true,
+      "scope": "ListAgents filters private agents: only visible to agent owner_id or workspace owner/admin. Regular members only see workspace-visible agents."
     },
     {
       "task": "Frontend: Settings page use shadcn components consistently",
