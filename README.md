@@ -131,8 +131,9 @@ For browser-based auth from source, make sure the local frontend is running at `
 ### Authentication
 
 ```bash
-multica auth login          # Open browser to authenticate (one-click if already logged in)
-multica auth login --token  # Paste a personal access token manually
+multica login               # Authenticate and auto-watch your workspaces
+multica auth login          # Legacy auth-only flow
+multica auth login --token  # Legacy token-only auth flow
 multica auth status         # Show current auth status
 multica auth logout         # Remove stored token
 ```
@@ -143,6 +144,7 @@ Credentials are saved to `~/.multica/config.json`.
 
 ```bash
 multica workspace list      # List all workspaces you belong to
+multica workspace get       # Show the current workspace details/context
 ```
 
 ### Daemon Watch List
@@ -163,13 +165,13 @@ The daemon polls watched workspaces for tasks and executes them using locally in
 
 ```bash
 # 1. Authenticate
-multica auth login
+multica login
 
 # 2. Add workspaces to watch
 multica workspace watch <workspace-id>
 
 # 3. Start the daemon
-multica daemon
+multica daemon start
 ```
 
 The daemon auto-detects available agent CLIs (`claude`, `codex`) on your PATH. When a task is claimed, it creates an isolated execution environment, runs the agent, and reports results back to the server.
@@ -178,8 +180,9 @@ The daemon auto-detects available agent CLIs (`claude`, `codex`) on your PATH. W
 
 ```bash
 multica agent list          # List agents in the current workspace
-multica runtime list        # List registered runtimes
-multica config show         # Show CLI configuration
+multica daemon status       # Show local daemon status
+multica config              # Show CLI configuration
+multica config show         # Compatibility alias for config display
 multica version             # Show CLI version
 ```
 

@@ -2,9 +2,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -15,22 +24,179 @@ import (
 
 var daemonCmd = &cobra.Command{
 	Use:   "daemon",
-	Short: "Run the local agent runtime daemon",
-	Long:  "Start the daemon process that polls for tasks and executes them using local agent CLIs (Claude, Codex).",
-	RunE:  runDaemon,
+	Short: "Manage the local agent runtime daemon",
+}
+
+var daemonStartCmd = &cobra.Command{
+	Use:   "start",
+	Short: "Start the local agent runtime daemon",
+	Long:  "Start the daemon process that polls for tasks and executes them using local agent CLIs (Claude, Codex).\nRuns in the background by default. Use --foreground to run in the current terminal.",
+	RunE:  runDaemonStart,
+}
+
+var daemonStopCmd = &cobra.Command{
+	Use:   "stop",
+	Short: "Stop the running daemon",
+	RunE:  runDaemonStop,
+}
+
+var daemonStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show daemon status",
+	RunE:  runDaemonStatus,
+}
+
+var daemonLogsCmd = &cobra.Command{
+	Use:   "logs",
+	Short: "Show daemon logs",
+	RunE:  runDaemonLogs,
 }
 
 func init() {
-	f := daemonCmd.Flags()
+	f := daemonStartCmd.Flags()
+	f.Bool("foreground", false, "Run in the foreground instead of background")
 	f.String("daemon-id", "", "Unique daemon identifier (env: MULTICA_DAEMON_ID)")
 	f.String("device-name", "", "Human-readable device name (env: MULTICA_DAEMON_DEVICE_NAME)")
 	f.String("runtime-name", "", "Runtime display name (env: MULTICA_AGENT_RUNTIME_NAME)")
 	f.Duration("poll-interval", 0, "Task poll interval (env: MULTICA_DAEMON_POLL_INTERVAL)")
 	f.Duration("heartbeat-interval", 0, "Heartbeat interval (env: MULTICA_DAEMON_HEARTBEAT_INTERVAL)")
 	f.Duration("agent-timeout", 0, "Per-task timeout (env: MULTICA_AGENT_TIMEOUT)")
+
+	daemonLogsCmd.Flags().BoolP("follow", "f", false, "Follow log output")
+	daemonLogsCmd.Flags().IntP("lines", "n", 50, "Number of lines to show")
+
+	daemonStatusCmd.Flags().String("output", "table", "Output format: table or json")
+
+	daemonCmd.AddCommand(daemonStartCmd)
+	daemonCmd.AddCommand(daemonStopCmd)
+	daemonCmd.AddCommand(daemonStatusCmd)
+	daemonCmd.AddCommand(daemonLogsCmd)
 }
 
-func runDaemon(cmd *cobra.Command, _ []string) error {
+// daemonDir returns the path to ~/.multica/.
+func daemonDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".multica")
+}
+
+func daemonPIDPath() string {
+	return filepath.Join(daemonDir(), "daemon.pid")
+}
+
+func daemonLogPath() string {
+	return filepath.Join(daemonDir(), "daemon.log")
+}
+
+// --- daemon start ---
+
+func runDaemonStart(cmd *cobra.Command, _ []string) error {
+	foreground, _ := cmd.Flags().GetBool("foreground")
+	if foreground {
+		return runDaemonForeground(cmd)
+	}
+	return runDaemonBackground(cmd)
+}
+
+func runDaemonBackground(cmd *cobra.Command) error {
+	// Check if daemon is already running.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	health := checkDaemonHealth(ctx)
+	if health["status"] == "running" {
+		return fmt.Errorf("daemon is already running (pid %v)", health["pid"])
+	}
+
+	// Resolve current executable.
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve executable path: %w", err)
+	}
+
+	// Build child args: daemon start --foreground + forwarded flags.
+	args := buildDaemonStartArgs(cmd)
+
+	// Ensure daemon directory exists.
+	dir := daemonDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create daemon directory: %w", err)
+	}
+
+	logPath := daemonLogPath()
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("open log file %s: %w", logPath, err)
+	}
+
+	child := exec.Command(exePath, args...)
+	child.Stdout = logFile
+	child.Stderr = logFile
+	child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+
+	if err := child.Start(); err != nil {
+		logFile.Close()
+		return fmt.Errorf("start daemon: %w", err)
+	}
+	logFile.Close()
+
+	// Detach: we don't Wait() on the child — it runs independently.
+	child.Process.Release()
+
+	// Write PID file.
+	pidPath := daemonPIDPath()
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(child.Process.Pid)), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not write PID file: %v\n", err)
+	}
+
+	// Wait briefly and verify daemon started via health endpoint.
+	time.Sleep(2 * time.Second)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel2()
+	health = checkDaemonHealth(ctx2)
+	if health["status"] != "running" {
+		fmt.Fprintf(os.Stderr, "Daemon may not have started successfully. Check logs:\n  %s\n", logPath)
+		return nil
+	}
+
+	fmt.Fprintf(os.Stderr, "Daemon started (pid %d)\n", child.Process.Pid)
+	fmt.Fprintf(os.Stderr, "Logs: %s\n", logPath)
+	return nil
+}
+
+// buildDaemonStartArgs constructs args for the background child process.
+func buildDaemonStartArgs(cmd *cobra.Command) []string {
+	args := []string{"daemon", "start", "--foreground"}
+
+	if v := flagString(cmd, "daemon-id"); v != "" {
+		args = append(args, "--daemon-id", v)
+	}
+	if v := flagString(cmd, "device-name"); v != "" {
+		args = append(args, "--device-name", v)
+	}
+	if v := flagString(cmd, "runtime-name"); v != "" {
+		args = append(args, "--runtime-name", v)
+	}
+	if d, _ := cmd.Flags().GetDuration("poll-interval"); d > 0 {
+		args = append(args, "--poll-interval", d.String())
+	}
+	if d, _ := cmd.Flags().GetDuration("heartbeat-interval"); d > 0 {
+		args = append(args, "--heartbeat-interval", d.String())
+	}
+	if d, _ := cmd.Flags().GetDuration("agent-timeout"); d > 0 {
+		args = append(args, "--agent-timeout", d.String())
+	}
+
+	// Forward global persistent flags.
+	if v, _ := cmd.Flags().GetString("server-url"); v != "" {
+		args = append(args, "--server-url", v)
+	}
+
+	return args
+}
+
+func runDaemonForeground(cmd *cobra.Command) error {
 	overrides := daemon.Overrides{
 		ServerURL:   cli.FlagOrEnv(cmd, "server-url", "MULTICA_SERVER_URL", ""),
 		DaemonID:    flagString(cmd, "daemon-id"),
@@ -58,12 +224,142 @@ func runDaemon(cmd *cobra.Command, _ []string) error {
 	logger := logger_pkg.NewLogger("daemon")
 	d := daemon.New(cfg, logger)
 
+	// Write PID file so "daemon stop" can find us.
+	if dir := daemonDir(); dir != "" {
+		os.MkdirAll(dir, 0o755)
+		os.WriteFile(daemonPIDPath(), []byte(strconv.Itoa(os.Getpid())), 0o644)
+	}
+	defer os.Remove(daemonPIDPath())
+
 	if err := d.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
 	return nil
 }
 
+// --- daemon stop ---
+
+func runDaemonStop(_ *cobra.Command, _ []string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	health := checkDaemonHealth(ctx)
+	if health["status"] != "running" {
+		fmt.Fprintln(os.Stderr, "Daemon is not running.")
+		return nil
+	}
+
+	pid, ok := health["pid"].(float64)
+	if !ok || pid == 0 {
+		return fmt.Errorf("could not determine daemon PID from health endpoint")
+	}
+
+	process, err := os.FindProcess(int(pid))
+	if err != nil {
+		return fmt.Errorf("find process %d: %w", int(pid), err)
+	}
+
+	if err := process.Signal(syscall.SIGTERM); err != nil {
+		return fmt.Errorf("stop daemon (pid %d): %w", int(pid), err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Stopping daemon (pid %d)...\n", int(pid))
+
+	// Poll health endpoint until daemon is gone.
+	for i := 0; i < 10; i++ {
+		time.Sleep(500 * time.Millisecond)
+		ctx2, cancel2 := context.WithTimeout(context.Background(), 1*time.Second)
+		h := checkDaemonHealth(ctx2)
+		cancel2()
+		if h["status"] != "running" {
+			os.Remove(daemonPIDPath())
+			fmt.Fprintln(os.Stderr, "Daemon stopped.")
+			return nil
+		}
+	}
+
+	fmt.Fprintln(os.Stderr, "Daemon is still stopping. It may be finishing a running task.")
+	return nil
+}
+
+// --- daemon status ---
+
+func runDaemonStatus(cmd *cobra.Command, _ []string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	health := checkDaemonHealth(ctx)
+
+	output, _ := cmd.Flags().GetString("output")
+	if output == "json" {
+		return cli.PrintJSON(os.Stdout, health)
+	}
+
+	if health["status"] != "running" {
+		fmt.Fprintln(os.Stdout, "Daemon: stopped")
+		return nil
+	}
+
+	fmt.Fprintf(os.Stdout, "Daemon:      running (pid %v, uptime %v)\n", health["pid"], health["uptime"])
+	if agents, ok := health["agents"].([]any); ok && len(agents) > 0 {
+		parts := make([]string, len(agents))
+		for i, a := range agents {
+			parts[i] = fmt.Sprint(a)
+		}
+		fmt.Fprintf(os.Stdout, "Agents:      %s\n", strings.Join(parts, ", "))
+	}
+	if ws, ok := health["workspaces"].([]any); ok {
+		fmt.Fprintf(os.Stdout, "Workspaces:  %d\n", len(ws))
+	}
+	return nil
+}
+
+// --- daemon logs ---
+
+func runDaemonLogs(cmd *cobra.Command, _ []string) error {
+	logPath := daemonLogPath()
+	if _, err := os.Stat(logPath); os.IsNotExist(err) {
+		return fmt.Errorf("no log file found at %s\nThe daemon may not have been started in background mode", logPath)
+	}
+
+	follow, _ := cmd.Flags().GetBool("follow")
+	lines, _ := cmd.Flags().GetInt("lines")
+
+	args := []string{"-n", strconv.Itoa(lines)}
+	if follow {
+		args = append(args, "-f")
+	}
+	args = append(args, logPath)
+
+	tail := exec.Command("tail", args...)
+	tail.Stdout = os.Stdout
+	tail.Stderr = os.Stderr
+	return tail.Run()
+}
+
+// checkDaemonHealth calls the daemon's local health endpoint.
+func checkDaemonHealth(ctx context.Context) map[string]any {
+	addr := fmt.Sprintf("http://127.0.0.1:%d/health", daemon.DefaultHealthPort)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, addr, nil)
+	if err != nil {
+		return map[string]any{"status": "stopped"}
+	}
+
+	httpClient := &http.Client{Timeout: 2 * time.Second}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return map[string]any{"status": "stopped"}
+	}
+	defer resp.Body.Close()
+
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return map[string]any{"status": "stopped"}
+	}
+	return result
+}
+
+// flagString returns a string flag value or empty string.
 func flagString(cmd *cobra.Command, name string) string {
 	val, _ := cmd.Flags().GetString(name)
 	return val

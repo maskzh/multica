@@ -26,9 +26,11 @@ var authCmd = &cobra.Command{
 }
 
 var authLoginCmd = &cobra.Command{
-	Use:   "login",
-	Short: "Authenticate with Multica",
-	RunE:  runAuthLogin,
+	Use:    "login",
+	Short:  "Authenticate with Multica",
+	Long:   "Authenticate with Multica without auto-configuring workspaces. Use 'multica login' for the guided setup flow.",
+	Hidden: true,
+	RunE:   runAuthLogin,
 }
 
 var authStatusCmd = &cobra.Command{
@@ -257,7 +259,7 @@ func runAuthStatus(cmd *cobra.Command, _ []string) error {
 	serverURL := resolveServerURL(cmd)
 
 	if token == "" {
-		fmt.Fprintln(os.Stderr, "Not authenticated. Run 'multica auth login' to authenticate.")
+		fmt.Fprintln(os.Stderr, "Not authenticated. Run 'multica login' to authenticate.")
 		return nil
 	}
 
@@ -271,7 +273,7 @@ func runAuthStatus(cmd *cobra.Command, _ []string) error {
 		Email string `json:"email"`
 	}
 	if err := client.GetJSON(ctx, "/api/me", &me); err != nil {
-		fmt.Fprintf(os.Stderr, "Token is invalid or expired: %v\nRun 'multica auth login' to re-authenticate.\n", err)
+		fmt.Fprintf(os.Stderr, "Token is invalid or expired: %v\nRun 'multica login' to re-authenticate.\n", err)
 		return nil
 	}
 

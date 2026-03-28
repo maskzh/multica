@@ -105,6 +105,17 @@ func (q *Queries) ListAgentRuntimes(ctx context.Context, workspaceID pgtype.UUID
 	return items, nil
 }
 
+const setAgentRuntimeOffline = `-- name: SetAgentRuntimeOffline :exec
+UPDATE agent_runtime
+SET status = 'offline', updated_at = now()
+WHERE id = $1
+`
+
+func (q *Queries) SetAgentRuntimeOffline(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, setAgentRuntimeOffline, id)
+	return err
+}
+
 const updateAgentRuntimeHeartbeat = `-- name: UpdateAgentRuntimeHeartbeat :one
 UPDATE agent_runtime
 SET status = 'online', last_seen_at = now(), updated_at = now()

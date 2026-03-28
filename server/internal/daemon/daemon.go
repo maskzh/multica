@@ -73,6 +73,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return fmt.Errorf("no runtimes registered")
 	}
 
+	// Deregister runtimes on shutdown (uses a fresh context since ctx will be cancelled).
+	defer d.deregisterRuntimes()
+
 	// Start config watcher for hot-reload.
 	go d.configWatchLoop(ctx)
 
@@ -82,6 +85,23 @@ func (d *Daemon) Run(ctx context.Context) error {
 	return d.pollLoop(ctx)
 }
 
+// deregisterRuntimes notifies the server that all runtimes are going offline.
+func (d *Daemon) deregisterRuntimes() {
+	runtimeIDs := d.allRuntimeIDs()
+	if len(runtimeIDs) == 0 {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := d.client.Deregister(ctx, runtimeIDs); err != nil {
+		d.logger.Warn("failed to deregister runtimes on shutdown", "error", err)
+	} else {
+		d.logger.Info("deregistered runtimes", "count", len(runtimeIDs))
+	}
+}
+
 // resolveAuth loads the auth token from the CLI config.
 func (d *Daemon) resolveAuth() error {
 	cfg, err := cli.LoadCLIConfig()
@@ -89,8 +109,8 @@ func (d *Daemon) resolveAuth() error {
 		return fmt.Errorf("load CLI config: %w", err)
 	}
 	if cfg.Token == "" {
-		d.logger.Warn("not authenticated — run 'multica auth login' to authenticate, then restart the daemon")
-		return fmt.Errorf("not authenticated: run 'multica auth login' first")
+		d.logger.Warn("not authenticated — run 'multica login' to authenticate, then restart the daemon")
+		return fmt.Errorf("not authenticated: run 'multica login' first")
 	}
 	d.client.SetToken(cfg.Token)
 	d.logger.Info("authenticated")
@@ -105,7 +125,7 @@ func (d *Daemon) loadWatchedWorkspaces(ctx context.Context) error {
 	}
 
 	if len(cfg.WatchedWorkspaces) == 0 {
-		return fmt.Errorf("no watched workspaces configured: run 'multica watch <id>' to add one")
+		return fmt.Errorf("no watched workspaces configured: run 'multica workspace watch <id>' to add one")
 	}
 
 	var registered int

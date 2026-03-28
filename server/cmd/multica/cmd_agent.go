@@ -24,35 +24,10 @@ var agentListCmd = &cobra.Command{
 	RunE:  runAgentList,
 }
 
-var agentGetCmd = &cobra.Command{
-	Use:   "get <id>",
-	Short: "Get agent details",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runAgentGet,
-}
-
-var agentDeleteCmd = &cobra.Command{
-	Use:   "delete <id>",
-	Short: "Delete an agent",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runAgentDelete,
-}
-
-var agentStopCmd = &cobra.Command{
-	Use:   "stop <id>",
-	Short: "Stop an agent (set status to offline)",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runAgentStop,
-}
-
 func init() {
 	agentCmd.AddCommand(agentListCmd)
-	agentCmd.AddCommand(agentGetCmd)
-	agentCmd.AddCommand(agentDeleteCmd)
-	agentCmd.AddCommand(agentStopCmd)
 
 	agentListCmd.Flags().String("output", "table", "Output format: table or json")
-	agentGetCmd.Flags().String("output", "json", "Output format: table or json")
 }
 
 func newAPIClient(cmd *cobra.Command) (*cli.APIClient, error) {
@@ -133,72 +108,6 @@ func runAgentList(cmd *cobra.Command, _ []string) error {
 		})
 	}
 	cli.PrintTable(os.Stdout, headers, rows)
-	return nil
-}
-
-func runAgentGet(cmd *cobra.Command, args []string) error {
-	client, err := newAPIClient(cmd)
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	var agent map[string]any
-	if err := client.GetJSON(ctx, "/api/agents/"+args[0], &agent); err != nil {
-		return fmt.Errorf("get agent: %w", err)
-	}
-
-	output, _ := cmd.Flags().GetString("output")
-	if output == "table" {
-		headers := []string{"ID", "NAME", "STATUS", "RUNTIME", "DESCRIPTION"}
-		rows := [][]string{{
-			strVal(agent, "id"),
-			strVal(agent, "name"),
-			strVal(agent, "status"),
-			strVal(agent, "runtime_mode"),
-			strVal(agent, "description"),
-		}}
-		cli.PrintTable(os.Stdout, headers, rows)
-		return nil
-	}
-
-	return cli.PrintJSON(os.Stdout, agent)
-}
-
-func runAgentDelete(cmd *cobra.Command, args []string) error {
-	client, err := newAPIClient(cmd)
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	if err := client.DeleteJSON(ctx, "/api/agents/"+args[0]); err != nil {
-		return fmt.Errorf("delete agent: %w", err)
-	}
-
-	fmt.Fprintf(os.Stderr, "Agent %s deleted.\n", args[0])
-	return nil
-}
-
-func runAgentStop(cmd *cobra.Command, args []string) error {
-	client, err := newAPIClient(cmd)
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	body := map[string]any{"status": "offline"}
-	if err := client.PutJSON(ctx, "/api/agents/"+args[0], body, nil); err != nil {
-		return fmt.Errorf("stop agent: %w", err)
-	}
-
-	fmt.Fprintf(os.Stderr, "Agent %s stopped.\n", args[0])
 	return nil
 }
 

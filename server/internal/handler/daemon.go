@@ -109,6 +109,51 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"runtimes": resp})
 }
 
+// DaemonDeregister marks runtimes as offline when the daemon shuts down.
+func (h *Handler) DaemonDeregister(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		RuntimeIDs []string `json:"runtime_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if len(req.RuntimeIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "runtime_ids is required")
+		return
+	}
+
+	// Track affected workspaces for WS notifications.
+	affectedWorkspaces := make(map[string]bool)
+
+	for _, rid := range req.RuntimeIDs {
+		// Look up the runtime to find its workspace.
+		rt, err := h.Queries.GetAgentRuntime(r.Context(), parseUUID(rid))
+		if err != nil {
+			slog.Warn("deregister: runtime not found", "runtime_id", rid, "error", err)
+			continue
+		}
+
+		if err := h.Queries.SetAgentRuntimeOffline(r.Context(), parseUUID(rid)); err != nil {
+			slog.Warn("deregister: failed to set offline", "runtime_id", rid, "error", err)
+			continue
+		}
+
+		affectedWorkspaces[uuidToString(rt.WorkspaceID)] = true
+	}
+
+	// Notify frontend clients so they re-fetch runtime list.
+	for wsID := range affectedWorkspaces {
+		h.publish(protocol.EventDaemonRegister, wsID, "system", "", map[string]any{
+			"action": "deregister",
+		})
+	}
+
+	slog.Info("daemon deregistered", "runtime_ids", req.RuntimeIDs)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 type DaemonHeartbeatRequest struct {
 	RuntimeID string `json:"runtime_id"`
 }

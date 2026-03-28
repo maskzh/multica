@@ -128,6 +128,12 @@ func (c *Client) ReportPingResult(ctx context.Context, runtimeID, pingID string,
 	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/runtimes/%s/ping/%s/result", runtimeID, pingID), result, nil)
 }
 
+func (c *Client) Deregister(ctx context.Context, runtimeIDs []string) error {
+	return c.postJSON(ctx, "/api/daemon/deregister", map[string]any{
+		"runtime_ids": runtimeIDs,
+	}, nil)
+}
+
 func (c *Client) Register(ctx context.Context, req map[string]any) ([]Runtime, error) {
 	var resp struct {
 		Runtimes []Runtime `json:"runtimes"`

@@ -11,7 +11,8 @@ import (
 
 var configCmd = &cobra.Command{
 	Use:   "config",
-	Short: "Manage CLI configuration",
+	Short: "Show CLI configuration",
+	RunE:  runConfigShow,
 }
 
 var configShowCmd = &cobra.Command{
