@@ -181,6 +181,10 @@ func (b *claudeBackend) handleAssistant(msg claudeSDKMessage, ch chan<- Message,
 				output.WriteString(block.Text)
 				trySend(ch, Message{Type: MessageText, Content: block.Text})
 			}
+		case "thinking":
+			if block.Text != "" {
+				trySend(ch, Message{Type: MessageThinking, Content: block.Text})
+			}
 		case "tool_use":
 			var input map[string]any
 			if block.Input != nil {

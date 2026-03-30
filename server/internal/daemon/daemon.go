@@ -827,10 +827,22 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 		var seq atomic.Int32
 		var mu sync.Mutex
 		var pendingText strings.Builder
+		var pendingThinking strings.Builder
 		var batch []TaskMessageData
+		callIDToTool := map[string]string{} // track callID → tool name for tool_result
 
 		flush := func() {
 			mu.Lock()
+			// Flush any accumulated thinking as a single message.
+			if pendingThinking.Len() > 0 {
+				s := seq.Add(1)
+				batch = append(batch, TaskMessageData{
+					Seq:     int(s),
+					Type:    "thinking",
+					Content: pendingThinking.String(),
+				})
+				pendingThinking.Reset()
+			}
 			// Flush any accumulated text as a single message.
 			if pendingText.Len() > 0 {
 				s := seq.Add(1)
@@ -854,7 +866,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 			}
 		}
 
-		// Periodically flush accumulated text messages.
+		// Periodically flush accumulated text/thinking messages.
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 
@@ -875,30 +887,47 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 			case agent.MessageToolUse:
 				n := toolCount.Add(1)
 				taskLog.Info(fmt.Sprintf("tool #%d: %s", n, msg.Tool))
+				if msg.CallID != "" {
+					mu.Lock()
+					callIDToTool[msg.CallID] = msg.Tool
+					mu.Unlock()
+				}
 				s := seq.Add(1)
 				mu.Lock()
 				batch = append(batch, TaskMessageData{
-					Seq:  int(s),
-					Type: "tool_use",
-					Tool: msg.Tool,
+					Seq:   int(s),
+					Type:  "tool_use",
+					Tool:  msg.Tool,
 					Input: msg.Input,
 				})
 				mu.Unlock()
 			case agent.MessageToolResult:
 				s := seq.Add(1)
-				// Truncate large tool results for the live feed.
 				output := msg.Output
 				if len(output) > 8192 {
 					output = output[:8192]
+				}
+				// Resolve tool name from callID if not set directly.
+				toolName := msg.Tool
+				if toolName == "" && msg.CallID != "" {
+					mu.Lock()
+					toolName = callIDToTool[msg.CallID]
+					mu.Unlock()
 				}
 				mu.Lock()
 				batch = append(batch, TaskMessageData{
 					Seq:    int(s),
 					Type:   "tool_result",
-					Tool:   msg.Tool,
+					Tool:   toolName,
 					Output: output,
 				})
 				mu.Unlock()
+			case agent.MessageThinking:
+				if msg.Content != "" {
+					mu.Lock()
+					pendingThinking.WriteString(msg.Content)
+					mu.Unlock()
+				}
 			case agent.MessageText:
 				if msg.Content != "" {
 					taskLog.Debug("agent", "text", truncateLog(msg.Content, 200))

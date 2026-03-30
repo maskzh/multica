@@ -318,6 +318,10 @@ export class ApiClient {
     return this.fetch(`/api/daemon/tasks/${taskId}/messages`);
   }
 
+  async listTasksByIssue(issueId: string): Promise<AgentTask[]> {
+    return this.fetch(`/api/issues/${issueId}/task-runs`);
+  }
+
   async getDaemonPairingSession(token: string): Promise<DaemonPairingSession> {
     return this.fetch(`/api/daemon/pairing-sessions/${token}`);
   }

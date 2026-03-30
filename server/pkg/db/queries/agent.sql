@@ -134,6 +134,11 @@ SELECT * FROM agent_task_queue
 WHERE issue_id = $1 AND status IN ('dispatched', 'running')
 ORDER BY created_at DESC;
 
+-- name: ListTasksByIssue :many
+SELECT * FROM agent_task_queue
+WHERE issue_id = $1
+ORDER BY created_at DESC;
+
 -- name: UpdateAgentStatus :one
 UPDATE agent SET status = $2, updated_at = now()
 WHERE id = $1

@@ -42,6 +42,7 @@ type MessageType string
 
 const (
 	MessageText       MessageType = "text"
+	MessageThinking   MessageType = "thinking"
 	MessageToolUse    MessageType = "tool-use"
 	MessageToolResult MessageType = "tool-result"
 	MessageStatus     MessageType = "status"

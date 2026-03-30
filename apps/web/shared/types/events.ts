@@ -153,7 +153,7 @@ export interface TaskMessagePayload {
   task_id: string;
   issue_id: string;
   seq: number;
-  type: "text" | "tool_use" | "tool_result" | "error";
+  type: "text" | "thinking" | "tool_use" | "tool_result" | "error";
   tool?: string;
   content?: string;
   input?: Record<string, unknown>;
