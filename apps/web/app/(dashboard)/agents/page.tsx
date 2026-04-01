@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useDefaultLayout } from "react-resizable-panels";
 import {
   Bot,
@@ -28,6 +28,7 @@ import {
   Globe,
   Lock,
   Settings,
+  Camera,
 } from "lucide-react";
 import type {
   Agent,
@@ -74,6 +75,7 @@ import { useAuthStore } from "@/features/auth";
 import { useWorkspaceStore } from "@/features/workspace";
 import { useRuntimeStore } from "@/features/runtimes";
 import { useIssueStore } from "@/features/issues";
+import { useFileUpload } from "@/shared/hooks/use-file-upload";
 
 
 // ---------------------------------------------------------------------------
@@ -341,8 +343,12 @@ function AgentListItem({
         isSelected ? "bg-accent" : "hover:bg-accent/50"
       }`}
     >
-      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-muted text-xs font-semibold">
-        {getInitials(agent.name)}
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-muted text-xs font-semibold overflow-hidden">
+        {agent.avatar_url ? (
+          <img src={agent.avatar_url} alt={agent.name} className="h-full w-full object-cover" />
+        ) : (
+          getInitials(agent.name)
+        )}
       </div>
 
       <div className="min-w-0 flex-1">
@@ -1173,6 +1179,22 @@ function SettingsTab({
   const [visibility, setVisibility] = useState<AgentVisibility>(agent.visibility);
   const [maxTasks, setMaxTasks] = useState(agent.max_concurrent_tasks);
   const [saving, setSaving] = useState(false);
+  const { upload, uploading } = useFileUpload();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleAvatarUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = "";
+    try {
+      const result = await upload(file);
+      if (!result) return;
+      await onSave({ avatar_url: result.link });
+      toast.success("Avatar updated");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to upload avatar");
+    }
+  };
 
   const dirty =
     name !== agent.name ||
@@ -1200,6 +1222,47 @@ function SettingsTab({
 
   return (
     <div className="max-w-lg space-y-6">
+      <div>
+        <Label className="text-xs text-muted-foreground">Avatar</Label>
+        <div className="mt-1.5 flex items-center gap-4">
+          <button
+            type="button"
+            className="group relative h-16 w-16 shrink-0 rounded-full bg-muted overflow-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+          >
+            {agent.avatar_url ? (
+              <img
+                src={agent.avatar_url}
+                alt={agent.name}
+                className="h-full w-full object-cover"
+              />
+            ) : (
+              <span className="flex h-full w-full items-center justify-center text-lg font-semibold text-muted-foreground">
+                {getInitials(agent.name)}
+              </span>
+            )}
+            <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity group-hover:opacity-100">
+              {uploading ? (
+                <Loader2 className="h-5 w-5 animate-spin text-white" />
+              ) : (
+                <Camera className="h-5 w-5 text-white" />
+              )}
+            </div>
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={handleAvatarUpload}
+          />
+          <div className="text-xs text-muted-foreground">
+            Click to upload avatar
+          </div>
+        </div>
+      </div>
+
       <div>
         <Label className="text-xs text-muted-foreground">Name</Label>
         <Input
@@ -1322,8 +1385,12 @@ function AgentDetail({
     <div className="flex h-full flex-col">
       {/* Header */}
       <div className="flex h-12 shrink-0 items-center gap-3 border-b px-4">
-        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-xs font-bold">
-          {getInitials(agent.name)}
+        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-xs font-bold overflow-hidden">
+          {agent.avatar_url ? (
+            <img src={agent.avatar_url} alt={agent.name} className="h-full w-full object-cover" />
+          ) : (
+            getInitials(agent.name)
+          )}
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
