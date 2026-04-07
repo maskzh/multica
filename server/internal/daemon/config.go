@@ -106,8 +106,15 @@ func LoadConfig(overrides Overrides) (Config, error) {
 			Model: strings.TrimSpace(os.Getenv("MULTICA_HERMES_MODEL")),
 		}
 	}
+	zodePath := envOrDefault("MULTICA_ZODE_PATH", "zode")
+	if _, err := exec.LookPath(zodePath); err == nil {
+		agents["zode"] = AgentEntry{
+			Path:  zodePath,
+			Model: strings.TrimSpace(os.Getenv("MULTICA_ZODE_MODEL")),
+		}
+	}
 	if len(agents) == 0 {
-		return Config{}, fmt.Errorf("no agent CLI found: install claude, codex, opencode, openclaw, or hermes and ensure it is on PATH")
+		return Config{}, fmt.Errorf("no agent CLI found: install claude, codex, opencode, openclaw, hermes, or zode and ensure it is on PATH")
 	}
 
 	// Host info
