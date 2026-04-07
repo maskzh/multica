@@ -206,6 +206,15 @@ func (d *Daemon) allRuntimeIDs() []string {
 	return ids
 }
 
+// backendProvider returns the actual agent backend type for an entry.
+// AgentEntry.Provider overrides the map key when set (e.g. "claude01" → "claude").
+func backendProvider(name string, entry AgentEntry) string {
+	if entry.Provider != "" {
+		return entry.Provider
+	}
+	return name
+}
+
 // findRuntime looks up a Runtime by its ID.
 func (d *Daemon) findRuntime(id string) *Runtime {
 	d.mu.Lock()
@@ -484,7 +493,7 @@ func (d *Daemon) handlePing(ctx context.Context, rt Runtime, pingID string) {
 		return
 	}
 
-	backend, err := agent.New(rt.Provider, agent.Config{
+	backend, err := agent.New(backendProvider(rt.Provider, entry), agent.Config{
 		ExecutablePath: entry.Path,
 		Logger:         d.logger,
 	})
@@ -877,6 +886,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 	if !ok {
 		return TaskResult{}, fmt.Errorf("no agent configured for provider %q", provider)
 	}
+	backendType := backendProvider(provider, entry)
 
 	agentName := "agent"
 	var skills []SkillData
@@ -903,7 +913,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 	// Try to reuse the workdir from a previous task on the same (agent, issue) pair.
 	var env *execenv.Environment
 	if task.PriorWorkDir != "" {
-		env = execenv.Reuse(task.PriorWorkDir, provider, taskCtx, d.logger)
+		env = execenv.Reuse(task.PriorWorkDir, backendType, taskCtx, d.logger)
 	}
 	if env == nil {
 		var err error
@@ -912,7 +922,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 			WorkspaceID:    task.WorkspaceID,
 			TaskID:         task.ID,
 			AgentName:      agentName,
-			Provider:       provider,
+			Provider:       backendType,
 			Task:           taskCtx,
 		}, d.logger)
 		if err != nil {
@@ -921,7 +931,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 	}
 
 	// Inject runtime-specific config (meta skill) so the agent discovers .agent_context/.
-	if err := execenv.InjectRuntimeConfig(env.WorkDir, provider, taskCtx); err != nil {
+	if err := execenv.InjectRuntimeConfig(env.WorkDir, backendType, taskCtx); err != nil {
 		d.logger.Warn("execenv: inject runtime config failed (non-fatal)", "error", err)
 	}
 	// NOTE: No cleanup — workdir is preserved for reuse by future tasks on
@@ -954,7 +964,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 	if env.CodexHome != "" {
 		agentEnv["CODEX_HOME"] = env.CodexHome
 	}
-	backend, err := agent.New(provider, agent.Config{
+	backend, err := agent.New(backendType, agent.Config{
 		ExecutablePath: entry.Path,
 		Env:            agentEnv,
 		Logger:         d.logger,
