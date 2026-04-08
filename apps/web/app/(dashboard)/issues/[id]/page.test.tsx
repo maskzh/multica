@@ -84,6 +84,9 @@ vi.mock("@/components/ui/calendar", () => ({
 
 // Mock ContentEditor (Tiptap needs real DOM)
 vi.mock("@/features/editor", () => ({
+  ReadonlyContent: ({ content }: { content: string }) => (
+    <div data-testid="readonly-content">{content}</div>
+  ),
   ContentEditor: forwardRef(({ defaultValue, onUpdate, placeholder, onSubmit }: any, ref: any) => {
     const valueRef = useRef(defaultValue || "");
     const [value, setValue] = useState(defaultValue || "");
