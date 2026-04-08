@@ -108,7 +108,7 @@ func New(agentType string, cfg Config) (Backend, error) {
 	case "zode":
 		return &acpBackend{cfg: cfg, defaultExec: "zode", startArgs: []string{"acp"}}, nil
 	default:
-		return nil, fmt.Errorf("unknown agent type: %q (supported: claude, codex, opencode, openclaw, hermes)", agentType)
+		return nil, fmt.Errorf("unknown agent type: %q (supported: claude, codex, opencode, openclaw, hermes, zode)", agentType)
 	}
 }
 
