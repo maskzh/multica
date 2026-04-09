@@ -1,8 +1,8 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/shared/api";
-import { useWorkspaceId } from "@core/hooks";
+import { api } from "@/platform/api";
+import { useWorkspaceId } from "@multica/core/hooks";
 import { chatKeys } from "./queries";
-import type { ChatMessage } from "@/shared/types";
+import type { ChatMessage } from "@multica/core/types";
 
 export function useCreateChatSession() {
   const qc = useQueryClient();

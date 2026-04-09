@@ -1,19 +1,21 @@
 "use client";
 
-import { Button } from "@/components/ui/button";
-import { MessageCircle } from "lucide-react";
+import { Send } from "lucide-react";
 import { useChatStore } from "../store";
 
 export function ChatFab() {
+  const isOpen = useChatStore((s) => s.isOpen);
   const toggle = useChatStore((s) => s.toggle);
 
+  if (isOpen) return null;
+
   return (
-    <Button
+    <button
       onClick={toggle}
-      size="icon"
-      className="fixed bottom-6 right-6 z-50 size-12 rounded-full shadow-lg bg-purple-600 hover:bg-purple-700 text-white"
+      className="fixed bottom-4 right-4 z-50 flex items-center gap-2 rounded-full border bg-background px-4 py-2 text-sm font-medium text-muted-foreground shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground"
     >
-      <MessageCircle className="size-5" />
-    </Button>
+      <Send className="size-3.5" />
+      Ask Multica
+    </button>
   );
 }

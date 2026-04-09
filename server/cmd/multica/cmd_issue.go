@@ -103,6 +103,13 @@ var issueRunMessagesCmd = &cobra.Command{
 	RunE:  runIssueRunMessages,
 }
 
+var issueSearchCmd = &cobra.Command{
+	Use:   "search <query>",
+	Short: "Search issues by title or description",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runIssueSearch,
+}
+
 var validIssueStatuses = []string{
 	"backlog", "todo", "in_progress", "in_review", "done", "blocked", "cancelled",
 }
@@ -117,6 +124,7 @@ func init() {
 	issueCmd.AddCommand(issueCommentCmd)
 	issueCmd.AddCommand(issueRunsCmd)
 	issueCmd.AddCommand(issueRunMessagesCmd)
+	issueCmd.AddCommand(issueSearchCmd)
 
 	issueCommentCmd.AddCommand(issueCommentListCmd)
 	issueCommentCmd.AddCommand(issueCommentAddCmd)
@@ -178,6 +186,11 @@ func init() {
 	issueCommentAddCmd.Flags().String("parent", "", "Parent comment ID (reply to a specific comment)")
 	issueCommentAddCmd.Flags().StringSlice("attachment", nil, "File path(s) to attach (can be specified multiple times)")
 	issueCommentAddCmd.Flags().String("output", "json", "Output format: table or json")
+
+	// issue search
+	issueSearchCmd.Flags().Int("limit", 20, "Maximum number of results to return")
+	issueSearchCmd.Flags().Bool("include-closed", false, "Include done and cancelled issues")
+	issueSearchCmd.Flags().String("output", "table", "Output format: table or json")
 }
 
 // ---------------------------------------------------------------------------
@@ -776,6 +789,69 @@ func runIssueRunMessages(cmd *cobra.Command, args []string) error {
 			strVal(m, "type"),
 			strVal(m, "tool"),
 			content,
+		})
+	}
+	cli.PrintTable(os.Stdout, headers, rows)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Search command
+// ---------------------------------------------------------------------------
+
+func runIssueSearch(cmd *cobra.Command, args []string) error {
+	client, err := newAPIClient(cmd)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	params := url.Values{}
+	params.Set("q", args[0])
+	if v, _ := cmd.Flags().GetInt("limit"); v > 0 {
+		params.Set("limit", fmt.Sprintf("%d", v))
+	}
+	if v, _ := cmd.Flags().GetBool("include-closed"); v {
+		params.Set("include_closed", "true")
+	}
+
+	path := "/api/issues/search?" + params.Encode()
+
+	var result map[string]any
+	if err := client.GetJSON(ctx, path, &result); err != nil {
+		return fmt.Errorf("search issues: %w", err)
+	}
+
+	issuesRaw, _ := result["issues"].([]any)
+
+	output, _ := cmd.Flags().GetString("output")
+	if output == "json" {
+		return cli.PrintJSON(os.Stdout, result)
+	}
+
+	headers := []string{"ID", "IDENTIFIER", "TITLE", "STATUS", "MATCH"}
+	rows := make([][]string, 0, len(issuesRaw))
+	for _, raw := range issuesRaw {
+		issue, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		matchInfo := strVal(issue, "match_source")
+		if snippet := strVal(issue, "matched_snippet"); snippet != "" {
+			if utf8.RuneCountInString(snippet) > 50 {
+				runes := []rune(snippet)
+				snippet = string(runes[:47]) + "..."
+			}
+			matchInfo += ": " + snippet
+		}
+		rows = append(rows, []string{
+			truncateID(strVal(issue, "id")),
+			strVal(issue, "identifier"),
+			strVal(issue, "title"),
+			strVal(issue, "status"),
+			matchInfo,
 		})
 	}
 	cli.PrintTable(os.Stdout, headers, rows)

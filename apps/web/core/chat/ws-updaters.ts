@@ -1,5 +1,5 @@
 import type { QueryClient } from "@tanstack/react-query";
-import type { ChatMessage } from "@/shared/types";
+import type { ChatMessage } from "@multica/core/types";
 import { chatKeys } from "./queries";
 
 export function onChatMessageCreated(
