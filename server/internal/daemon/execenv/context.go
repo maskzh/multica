@@ -34,7 +34,6 @@ func writeContextFiles(workDir, provider string, ctx TaskContextForEnv) error {
 			return fmt.Errorf("resolve skills dir: %w", err)
 		}
 		// Codex skills are written to codex-home in Prepare; skip here.
-		// Zode reads skills from .agent_context/skills/ (resolved by resolveSkillsDir default).
 		if provider != "codex" {
 			if err := writeSkillFiles(skillsDir, ctx.AgentSkills); err != nil {
 				return fmt.Errorf("write skill files: %w", err)
