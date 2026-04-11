@@ -9,6 +9,7 @@ WEB_DIR="$REPO_ROOT/apps/web"
 
 echo "==> Building Next.js..."
 cd "$WEB_DIR"
+STANDALONE=true \
 NEXT_PUBLIC_API_URL=https://multica.maskzh.com \
 NEXT_PUBLIC_WS_URL=wss://multica.maskzh.com/ws \
   pnpm exec next build
