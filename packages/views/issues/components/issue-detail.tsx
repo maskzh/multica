@@ -64,6 +64,7 @@ import { ProjectPicker } from "../../projects/components/project-picker";
 import { CommentCard } from "./comment-card";
 import { CommentInput } from "./comment-input";
 import { AgentLiveCard, TaskRunHistory } from "./agent-live-card";
+import { BacklogAgentHintDialog } from "./backlog-agent-hint-dialog";
 import { useQuery } from "@tanstack/react-query";
 import { useAuthStore } from "@multica/core/auth";
 import { useWorkspaceStore } from "@multica/core/workspace";
@@ -344,6 +345,7 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
   const [sidebarOpen, setSidebarOpen] = useState(defaultSidebarOpen);
   const [deleting, setDeleting] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [backlogHintOpen, setBacklogHintOpen] = useState(false);
   const [propertiesOpen, setPropertiesOpen] = useState(true);
   const [detailsOpen, setDetailsOpen] = useState(true);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -444,6 +446,16 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
         { id, ...updates },
         { onError: () => toast.error("Failed to update issue") },
       );
+      // Hint: assigning an agent to a backlog issue won't trigger execution
+      // until the issue is moved to an active status.
+      if (
+        updates.assignee_type === "agent" &&
+        updates.assignee_id &&
+        issue.status === "backlog" &&
+        localStorage.getItem("multica:backlog-agent-hint-dismissed") !== "true"
+      ) {
+        setBacklogHintOpen(true);
+      }
     },
     [issue, id, updateIssueMutation],
   );
@@ -861,6 +873,21 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
                 </AlertDialogFooter>
               </AlertDialogContent>
             </AlertDialog>
+
+            <BacklogAgentHintDialog
+              open={backlogHintOpen}
+              onOpenChange={setBacklogHintOpen}
+              onDismissPermanently={() => {
+                localStorage.setItem("multica:backlog-agent-hint-dismissed", "true");
+              }}
+              onMoveToTodo={() => {
+                updateIssueMutation.mutate(
+                  { id, status: "todo" },
+                  { onError: () => toast.error("Failed to update status") },
+                );
+                setBacklogHintOpen(false);
+              }}
+            />
 
             {/* Set parent issue picker */}
             <IssuePickerDialog
