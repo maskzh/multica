@@ -157,7 +157,6 @@ func (d *Daemon) allRuntimeIDs() []string {
 	return ids
 }
 
-
 // findRuntime looks up a Runtime by its ID.
 func (d *Daemon) findRuntime(id string) *Runtime {
 	d.mu.Lock()
@@ -801,6 +800,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 	if !ok {
 		return TaskResult{}, fmt.Errorf("no agent configured for provider %q", provider)
 	}
+
 	agentName := "agent"
 	var agentID string
 	var skills []SkillData
