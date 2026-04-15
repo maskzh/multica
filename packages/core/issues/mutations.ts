@@ -97,6 +97,7 @@ export function useCreateIssue() {
       // Invalidate parent's children query so sub-issues list updates immediately
       if (newIssue.parent_issue_id) {
         qc.invalidateQueries({ queryKey: issueKeys.children(wsId, newIssue.parent_issue_id) });
+        qc.invalidateQueries({ queryKey: issueKeys.childProgress(wsId) });
       }
     },
     onSettled: () => {
@@ -167,10 +168,20 @@ export function useUpdateIssue() {
     onSettled: (_data, _err, vars, ctx) => {
       qc.invalidateQueries({ queryKey: issueKeys.detail(wsId, vars.id) });
       qc.invalidateQueries({ queryKey: issueKeys.list(wsId) });
+      // Invalidate old parent's children cache
       if (ctx?.parentId) {
         qc.invalidateQueries({
           queryKey: issueKeys.children(wsId, ctx.parentId),
         });
+        qc.invalidateQueries({ queryKey: issueKeys.childProgress(wsId) });
+      }
+      // Invalidate new parent's children cache when parent_issue_id changed
+      const newParentId = vars.parent_issue_id;
+      if (newParentId && newParentId !== ctx?.parentId) {
+        qc.invalidateQueries({
+          queryKey: issueKeys.children(wsId, newParentId),
+        });
+        qc.invalidateQueries({ queryKey: issueKeys.childProgress(wsId) });
       }
     },
   });
@@ -205,6 +216,7 @@ export function useDeleteIssue() {
       qc.invalidateQueries({ queryKey: issueKeys.list(wsId) });
       if (ctx?.parentIssueId) {
         qc.invalidateQueries({ queryKey: issueKeys.children(wsId, ctx.parentIssueId) });
+        qc.invalidateQueries({ queryKey: issueKeys.childProgress(wsId) });
       }
     },
   });
@@ -278,10 +290,11 @@ export function useBatchDeleteIssues() {
     },
     onSettled: (_data, _err, _ids, ctx) => {
       qc.invalidateQueries({ queryKey: issueKeys.list(wsId) });
-      if (ctx?.parentIssueIds) {
+      if (ctx?.parentIssueIds && ctx.parentIssueIds.size > 0) {
         for (const parentId of ctx.parentIssueIds) {
           qc.invalidateQueries({ queryKey: issueKeys.children(wsId, parentId) });
         }
+        qc.invalidateQueries({ queryKey: issueKeys.childProgress(wsId) });
       }
     },
   });

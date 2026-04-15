@@ -27,8 +27,8 @@ import {
   SquarePen,
   CircleUser,
   FolderKanban,
-  Ellipsis,
   PinOff,
+  Zap,
 } from "lucide-react";
 import { WorkspaceAvatar } from "../workspace/workspace-avatar";
 import { ActorAvatar } from "@multica/ui/components/common/actor-avatar";
@@ -43,6 +43,7 @@ import {
   SidebarFooter,
   SidebarMenu,
   SidebarMenuButton,
+  SidebarMenuAction,
   SidebarMenuItem,
   SidebarRail,
 } from "@multica/ui/components/ui/sidebar";
@@ -55,15 +56,20 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@multica/ui/components/ui/dropdown-menu";
-import { Tooltip, TooltipTrigger, TooltipContent } from "@multica/ui/components/ui/tooltip";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@multica/ui/components/ui/popover";
 import { useAuthStore } from "@multica/core/auth";
 import { useWorkspaceStore } from "@multica/core/workspace";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { workspaceListOptions, myInvitationListOptions, workspaceKeys } from "@multica/core/workspace/queries";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { inboxKeys, deduplicateInboxItems } from "@multica/core/inbox/queries";
 import { api } from "@multica/core/api";
 import { useModalStore } from "@multica/core/modals";
 import { useMyRuntimesNeedUpdate } from "@multica/core/runtimes/hooks";
-import { pinKeys } from "@multica/core/pins/queries";
+import { pinListOptions } from "@multica/core/pins/queries";
 import { useDeletePin, useReorderPins } from "@multica/core/pins/mutations";
 import type { PinnedItem } from "@multica/core/types";
 
@@ -75,6 +81,7 @@ const personalNav = [
 const workspaceNav = [
   { href: "/issues", label: "Issues", icon: ListTodo },
   { href: "/projects", label: "Projects", icon: FolderKanban },
+  { href: "/autopilots", label: "Autopilot", icon: Zap },
   { href: "/agents", label: "Agents", icon: Bot },
 ];
 
@@ -93,7 +100,6 @@ function DraftDot() {
 function SortablePinItem({ pin, pathname, onUnpin }: { pin: PinnedItem; pathname: string; onUnpin: () => void }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: pin.id });
   const wasDragged = useRef(false);
-  const { push } = useNavigation();
 
   useEffect(() => {
     if (isDragging) wasDragged.current = true;
@@ -114,12 +120,13 @@ function SortablePinItem({ pin, pathname, onUnpin }: { pin: PinnedItem; pathname
     >
       <SidebarMenuButton
         isActive={isActive}
-        onClick={() => {
+        render={<AppLink href={href} />}
+        onClick={(event) => {
           if (wasDragged.current) {
             wasDragged.current = false;
+            event.preventDefault();
             return;
           }
-          push(href);
         }}
         className="text-muted-foreground hover:not-data-active:bg-sidebar-accent/70 data-active:bg-sidebar-accent data-active:text-sidebar-accent-foreground"
       >
@@ -129,17 +136,17 @@ function SortablePinItem({ pin, pathname, onUnpin }: { pin: PinnedItem; pathname
           <FolderKanban className="size-4 shrink-0" />
         )}
         <span className="truncate">{label}</span>
-        <button
-          className="ml-auto opacity-0 group-hover/pin:opacity-100 transition-opacity p-0.5 rounded hover:bg-accent shrink-0"
-          onClick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            onUnpin();
-          }}
-        >
-          <PinOff className="size-3 text-muted-foreground" />
-        </button>
       </SidebarMenuButton>
+      <SidebarMenuAction
+        showOnHover
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onUnpin();
+        }}
+      >
+        <PinOff className="size-3 text-muted-foreground" />
+      </SidebarMenuAction>
     </SidebarMenuItem>
   );
 }
@@ -158,10 +165,12 @@ interface AppSidebarProps {
 export function AppSidebar({ topSlot, searchSlot, headerClassName, headerStyle }: AppSidebarProps = {}) {
   const { pathname, push } = useNavigation();
   const user = useAuthStore((s) => s.user);
+  const userId = useAuthStore((s) => s.user?.id);
   const authLogout = useAuthStore((s) => s.logout);
   const workspace = useWorkspaceStore((s) => s.workspace);
-  const workspaces = useWorkspaceStore((s) => s.workspaces);
   const switchWorkspace = useWorkspaceStore((s) => s.switchWorkspace);
+  const { data: workspaces = [] } = useQuery(workspaceListOptions());
+  const { data: myInvitations = [] } = useQuery(myInvitationListOptions());
 
   const wsId = workspace?.id;
   const { data: inboxItems = [] } = useQuery({
@@ -174,10 +183,9 @@ export function AppSidebar({ topSlot, searchSlot, headerClassName, headerStyle }
     [inboxItems],
   );
   const hasRuntimeUpdates = useMyRuntimesNeedUpdate(wsId);
-  const { data: pinnedItems = [] } = useQuery<PinnedItem[]>({
-    queryKey: wsId ? pinKeys.list(wsId) : ["pins", "disabled"],
-    queryFn: () => api.listPins(),
-    enabled: !!wsId,
+  const { data: pinnedItems = [] } = useQuery({
+    ...pinListOptions(wsId ?? "", userId ?? ""),
+    enabled: !!wsId && !!userId,
   });
   const deletePin = useDeletePin();
   const reorderPins = useReorderPins();
@@ -196,6 +204,19 @@ export function AppSidebar({ topSlot, searchSlot, headerClassName, headerStyle }
   );
 
   const queryClient = useQueryClient();
+  const acceptInvitationMut = useMutation({
+    mutationFn: (id: string) => api.acceptInvitation(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: workspaceKeys.myInvitations() });
+      queryClient.invalidateQueries({ queryKey: workspaceKeys.list() });
+    },
+  });
+  const declineInvitationMut = useMutation({
+    mutationFn: (id: string) => api.declineInvitation(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: workspaceKeys.myInvitations() });
+    },
+  });
   const logout = () => {
     queryClient.clear();
     authLogout();
@@ -256,20 +277,9 @@ export function AppSidebar({ topSlot, searchSlot, headerClassName, headerStyle }
                     </DropdownMenuLabel>
                   </DropdownMenuGroup>
                   <DropdownMenuSeparator />
-                  <DropdownMenuGroup className="group/ws-section">
-                    <DropdownMenuLabel className="flex items-center text-xs text-muted-foreground">
+                  <DropdownMenuGroup>
+                    <DropdownMenuLabel className="text-xs text-muted-foreground">
                       Workspaces
-                      <Tooltip>
-                        <TooltipTrigger
-                          className="ml-auto opacity-0 group-hover/ws-section:opacity-100 transition-opacity rounded hover:bg-accent p-0.5"
-                          onClick={() => useModalStore.getState().open("create-workspace")}
-                        >
-                          <Plus className="h-3.5 w-3.5" />
-                        </TooltipTrigger>
-                        <TooltipContent side="right">
-                          Create workspace
-                        </TooltipContent>
-                      </Tooltip>
                     </DropdownMenuLabel>
                     {workspaces.map((ws) => (
                       <DropdownMenuItem
@@ -277,7 +287,7 @@ export function AppSidebar({ topSlot, searchSlot, headerClassName, headerStyle }
                         onClick={() => {
                           if (ws.id !== workspace?.id) {
                             push("/issues");
-                            switchWorkspace(ws.id);
+                            switchWorkspace(ws);
                           }
                         }}
                       >
@@ -288,7 +298,53 @@ export function AppSidebar({ topSlot, searchSlot, headerClassName, headerStyle }
                         )}
                       </DropdownMenuItem>
                     ))}
+                    <DropdownMenuItem
+                      onClick={() =>
+                        useModalStore.getState().open("create-workspace")
+                      }
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      Create workspace
+                    </DropdownMenuItem>
                   </DropdownMenuGroup>
+                  {myInvitations.length > 0 && (
+                    <>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuGroup>
+                        <DropdownMenuLabel className="text-xs text-muted-foreground">
+                          Pending invitations
+                        </DropdownMenuLabel>
+                        {myInvitations.map((inv) => (
+                          <div key={inv.id} className="flex items-center gap-2 px-2 py-1.5">
+                            <WorkspaceAvatar name={inv.workspace_name ?? "W"} size="sm" />
+                            <span className="flex-1 truncate text-sm">{inv.workspace_name ?? "Workspace"}</span>
+                            <button
+                              type="button"
+                              className="text-xs px-2 py-0.5 rounded bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                              disabled={acceptInvitationMut.isPending}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                acceptInvitationMut.mutate(inv.id);
+                              }}
+                            >
+                              Join
+                            </button>
+                            <button
+                              type="button"
+                              className="text-xs px-2 py-0.5 rounded bg-muted text-muted-foreground hover:bg-muted/80 disabled:opacity-50"
+                              disabled={declineInvitationMut.isPending}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                declineInvitationMut.mutate(inv.id);
+                              }}
+                            >
+                              Decline
+                            </button>
+                          </div>
+                        ))}
+                      </DropdownMenuGroup>
+                    </>
+                  )}
                   <DropdownMenuSeparator />
                   <DropdownMenuGroup>
                     <DropdownMenuItem variant="destructive" onClick={logout}>
@@ -425,33 +481,51 @@ export function AppSidebar({ topSlot, searchSlot, headerClassName, headerStyle }
 
         <SidebarFooter className="p-2">
           <div className="border-t pt-2">
-            <div className="flex items-center gap-2.5 rounded-md px-2 py-1.5">
-              <ActorAvatar
-                name={user?.name ?? ""}
-                initials={(user?.name ?? "U").charAt(0).toUpperCase()}
-                avatarUrl={user?.avatar_url}
-                size={28}
-              />
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium leading-tight">
-                  {user?.name}
-                </p>
-                <p className="truncate text-xs text-muted-foreground leading-tight">
-                  {user?.email}
-                </p>
-              </div>
-              <DropdownMenu>
-                <DropdownMenuTrigger className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors">
-                  <Ellipsis className="size-4" />
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" side="top" sideOffset={4}>
-                  <DropdownMenuItem variant="destructive" onClick={logout}>
+            <Popover>
+              <PopoverTrigger className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 hover:bg-accent transition-colors cursor-pointer">
+                <ActorAvatar
+                  name={user?.name ?? ""}
+                  initials={(user?.name ?? "U").charAt(0).toUpperCase()}
+                  avatarUrl={user?.avatar_url}
+                  size={28}
+                />
+                <div className="min-w-0 flex-1 text-left">
+                  <p className="truncate text-sm font-medium leading-tight">
+                    {user?.name}
+                  </p>
+                  <p className="truncate text-xs text-muted-foreground leading-tight">
+                    {user?.email}
+                  </p>
+                </div>
+              </PopoverTrigger>
+              <PopoverContent side="top" sideOffset={8} align="start" className="w-48 p-0">
+                <div className="flex items-center gap-2.5 px-2.5 py-2 border-b">
+                  <ActorAvatar
+                    name={user?.name ?? ""}
+                    initials={(user?.name ?? "U").charAt(0).toUpperCase()}
+                    avatarUrl={user?.avatar_url}
+                    size={32}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium">
+                      {user?.name}
+                    </p>
+                    <p className="truncate text-xs text-muted-foreground">
+                      {user?.email}
+                    </p>
+                  </div>
+                </div>
+                <div className="p-1">
+                  <button
+                    onClick={logout}
+                    className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-destructive hover:bg-destructive/10 transition-colors cursor-pointer"
+                  >
                     <LogOut className="h-3.5 w-3.5" />
                     Log out
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
+                  </button>
+                </div>
+              </PopoverContent>
+            </Popover>
           </div>
         </SidebarFooter>
         <SidebarRail />

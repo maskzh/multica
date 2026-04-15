@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"strings"
@@ -135,7 +136,9 @@ func init() {
 	issueListCmd.Flags().String("status", "", "Filter by status")
 	issueListCmd.Flags().String("priority", "", "Filter by priority")
 	issueListCmd.Flags().String("assignee", "", "Filter by assignee name")
+	issueListCmd.Flags().String("project", "", "Filter by project ID")
 	issueListCmd.Flags().Int("limit", 50, "Maximum number of issues to return")
+	issueListCmd.Flags().Int("offset", 0, "Number of issues to skip (for pagination)")
 
 	// issue get
 	issueGetCmd.Flags().String("output", "json", "Output format: table or json")
@@ -160,6 +163,7 @@ func init() {
 	issueUpdateCmd.Flags().String("assignee", "", "New assignee name (member or agent)")
 	issueUpdateCmd.Flags().String("project", "", "Project ID")
 	issueUpdateCmd.Flags().String("due-date", "", "New due date (RFC3339 format)")
+	issueUpdateCmd.Flags().String("parent", "", "Parent issue ID (use --parent \"\" to clear)")
 	issueUpdateCmd.Flags().String("output", "json", "Output format: table or json")
 
 	// issue status
@@ -184,7 +188,8 @@ func init() {
 	issueRunMessagesCmd.Flags().Int("since", 0, "Only return messages after this sequence number")
 
 	// issue comment add
-	issueCommentAddCmd.Flags().String("content", "", "Comment content (required)")
+	issueCommentAddCmd.Flags().String("content", "", "Comment content (required unless --content-stdin)")
+	issueCommentAddCmd.Flags().Bool("content-stdin", false, "Read comment content from stdin (avoids shell escaping issues)")
 	issueCommentAddCmd.Flags().String("parent", "", "Parent comment ID (reply to a specific comment)")
 	issueCommentAddCmd.Flags().StringSlice("attachment", nil, "File path(s) to attach (can be specified multiple times)")
 	issueCommentAddCmd.Flags().String("output", "json", "Output format: table or json")
@@ -232,6 +237,12 @@ func runIssueList(cmd *cobra.Command, _ []string) error {
 		}
 		params.Set("assignee_id", aID)
 	}
+	if v, _ := cmd.Flags().GetInt("offset"); v > 0 {
+		params.Set("offset", fmt.Sprintf("%d", v))
+	}
+	if v, _ := cmd.Flags().GetString("project"); v != "" {
+		params.Set("project_id", v)
+	}
 
 	path := "/api/issues"
 	if len(params) > 0 {
@@ -247,7 +258,18 @@ func runIssueList(cmd *cobra.Command, _ []string) error {
 
 	output, _ := cmd.Flags().GetString("output")
 	if output == "json" {
-		return cli.PrintJSON(os.Stdout, issuesRaw)
+		total, _ := result["total"].(float64)
+		limit, _ := cmd.Flags().GetInt("limit")
+		offset, _ := cmd.Flags().GetInt("offset")
+		hasMore := offset+len(issuesRaw) < int(total)
+		wrapped := map[string]any{
+			"issues":   issuesRaw,
+			"total":    int(total),
+			"limit":    limit,
+			"offset":   offset,
+			"has_more": hasMore,
+		}
+		return cli.PrintJSON(os.Stdout, wrapped)
 	}
 
 	headers := []string{"ID", "TITLE", "STATUS", "PRIORITY", "ASSIGNEE", "DUE DATE"}
@@ -437,6 +459,14 @@ func runIssueUpdate(cmd *cobra.Command, args []string) error {
 		}
 		body["assignee_type"] = aType
 		body["assignee_id"] = aID
+	}
+	if cmd.Flags().Changed("parent") {
+		v, _ := cmd.Flags().GetString("parent")
+		if v == "" {
+			body["parent_issue_id"] = nil
+		} else {
+			body["parent_issue_id"] = v
+		}
 	}
 
 	if len(body) == 0 {
@@ -633,8 +663,25 @@ func runIssueCommentList(cmd *cobra.Command, args []string) error {
 
 func runIssueCommentAdd(cmd *cobra.Command, args []string) error {
 	content, _ := cmd.Flags().GetString("content")
+	useStdin, _ := cmd.Flags().GetBool("content-stdin")
+
+	if content != "" && useStdin {
+		return fmt.Errorf("--content and --content-stdin are mutually exclusive")
+	}
+
+	if useStdin {
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return fmt.Errorf("read stdin: %w", err)
+		}
+		content = strings.TrimSuffix(string(data), "\n")
+		if content == "" {
+			return fmt.Errorf("stdin content is empty")
+		}
+	}
+
 	if content == "" {
-		return fmt.Errorf("--content is required")
+		return fmt.Errorf("--content or --content-stdin is required")
 	}
 
 	client, err := newAPIClient(cmd)

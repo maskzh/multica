@@ -41,6 +41,8 @@ import type {
   Attachment,
   ChatSession,
   ChatMessage,
+  ChatPendingTask,
+  PendingChatTasksResponse,
   SendChatMessageResponse,
   Project,
   CreateProjectRequest,
@@ -50,8 +52,20 @@ import type {
   CreatePinRequest,
   PinnedItemType,
   ReorderPinsRequest,
+  Invitation,
+  Autopilot,
+  AutopilotTrigger,
+  AutopilotRun,
+  CreateAutopilotRequest,
+  UpdateAutopilotRequest,
+  CreateAutopilotTriggerRequest,
+  UpdateAutopilotTriggerRequest,
+  ListAutopilotsResponse,
+  GetAutopilotResponse,
+  ListAutopilotRunsResponse,
 } from "../types";
 import { type Logger, noopLogger } from "../logger";
+import { createRequestId } from "../utils";
 
 export interface ApiClientOptions {
   logger?: Logger;
@@ -61,6 +75,18 @@ export interface ApiClientOptions {
 export interface LoginResponse {
   token: string;
   user: User;
+}
+
+export class ApiError extends Error {
+  readonly status: number;
+  readonly statusText: string;
+
+  constructor(message: string, status: number, statusText: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.statusText = statusText;
+  }
 }
 
 export class ApiClient {
@@ -76,6 +102,10 @@ export class ApiClient {
     this.logger = options?.logger ?? noopLogger;
   }
 
+  getBaseUrl(): string {
+    return this.baseUrl;
+  }
+
   setToken(token: string | null) {
     this.token = token;
   }
@@ -84,10 +114,20 @@ export class ApiClient {
     this.workspaceId = id;
   }
 
+  private readCsrfToken(): string | null {
+    if (typeof document === "undefined") return null;
+    const match = document.cookie
+      .split("; ")
+      .find((c) => c.startsWith("multica_csrf="));
+    return match ? match.split("=")[1] ?? null : null;
+  }
+
   private authHeaders(): Record<string, string> {
     const headers: Record<string, string> = {};
     if (this.token) headers["Authorization"] = `Bearer ${this.token}`;
     if (this.workspaceId) headers["X-Workspace-ID"] = this.workspaceId;
+    const csrf = this.readCsrfToken();
+    if (csrf) headers["X-CSRF-Token"] = csrf;
     return headers;
   }
 
@@ -108,7 +148,7 @@ export class ApiClient {
   }
 
   private async fetch<T>(path: string, init?: RequestInit): Promise<T> {
-    const rid = crypto.randomUUID().slice(0, 8);
+    const rid = createRequestId();
     const start = Date.now();
     const method = init?.method ?? "GET";
 
@@ -132,7 +172,7 @@ export class ApiClient {
       const message = await this.parseErrorMessage(res, `API error: ${res.status} ${res.statusText}`);
       const logLevel = res.status === 404 ? "warn" : "error";
       this.logger[logLevel](`← ${res.status} ${path}`, { rid, duration: `${Date.now() - start}ms`, error: message });
-      throw new Error(message);
+      throw new ApiError(message, res.status, res.statusText);
     }
 
     this.logger.info(`← ${res.status} ${path}`, { rid, duration: `${Date.now() - start}ms` });
@@ -165,6 +205,14 @@ export class ApiClient {
       method: "POST",
       body: JSON.stringify({ code, redirect_uri: redirectUri }),
     });
+  }
+
+  async logout(): Promise<void> {
+    await this.fetch("/auth/logout", { method: "POST" });
+  }
+
+  async issueCliToken(): Promise<{ token: string }> {
+    return this.fetch("/api/cli-token", { method: "POST" });
   }
 
   async getMe(): Promise<User> {
@@ -232,6 +280,10 @@ export class ApiClient {
 
   async listChildIssues(id: string): Promise<{ issues: Issue[] }> {
     return this.fetch(`/api/issues/${id}/children`);
+  }
+
+  async getChildIssueProgress(): Promise<{ progress: { parent_issue_id: string; total: number; done: number }[] }> {
+    return this.fetch("/api/issues/child-progress");
   }
 
   async deleteIssue(id: string): Promise<void> {
@@ -432,7 +484,7 @@ export class ApiClient {
   }
 
   async listTaskMessages(taskId: string): Promise<TaskMessagePayload[]> {
-    return this.fetch(`/api/daemon/tasks/${taskId}/messages`);
+    return this.fetch(`/api/tasks/${taskId}/messages`);
   }
 
   async listTasksByIssue(issueId: string): Promise<AgentTask[]> {
@@ -482,6 +534,11 @@ export class ApiClient {
     return this.fetch("/api/inbox/archive-completed", { method: "POST" });
   }
 
+  // App Config
+  async getConfig(): Promise<{ cdn_domain: string }> {
+    return this.fetch("/api/config");
+  }
+
   // Workspaces
   async listWorkspaces(): Promise<Workspace[]> {
     return this.fetch("/api/workspaces");
@@ -510,7 +567,7 @@ export class ApiClient {
     return this.fetch(`/api/workspaces/${workspaceId}/members`);
   }
 
-  async createMember(workspaceId: string, data: CreateMemberRequest): Promise<MemberWithUser> {
+  async createMember(workspaceId: string, data: CreateMemberRequest): Promise<Invitation> {
     return this.fetch(`/api/workspaces/${workspaceId}/members`, {
       method: "POST",
       body: JSON.stringify(data),
@@ -532,6 +589,37 @@ export class ApiClient {
 
   async leaveWorkspace(workspaceId: string): Promise<void> {
     await this.fetch(`/api/workspaces/${workspaceId}/leave`, {
+      method: "POST",
+    });
+  }
+
+  // Invitations
+  async listWorkspaceInvitations(workspaceId: string): Promise<Invitation[]> {
+    return this.fetch(`/api/workspaces/${workspaceId}/invitations`);
+  }
+
+  async revokeInvitation(workspaceId: string, invitationId: string): Promise<void> {
+    await this.fetch(`/api/workspaces/${workspaceId}/invitations/${invitationId}`, {
+      method: "DELETE",
+    });
+  }
+
+  async listMyInvitations(): Promise<Invitation[]> {
+    return this.fetch("/api/invitations");
+  }
+
+  async getInvitation(invitationId: string): Promise<Invitation> {
+    return this.fetch(`/api/invitations/${invitationId}`);
+  }
+
+  async acceptInvitation(invitationId: string): Promise<MemberWithUser> {
+    return this.fetch(`/api/invitations/${invitationId}/accept`, {
+      method: "POST",
+    });
+  }
+
+  async declineInvitation(invitationId: string): Promise<void> {
+    await this.fetch(`/api/invitations/${invitationId}/decline`, {
       method: "POST",
     });
   }
@@ -610,7 +698,7 @@ export class ApiClient {
     if (opts?.issueId) formData.append("issue_id", opts.issueId);
     if (opts?.commentId) formData.append("comment_id", opts.commentId);
 
-    const rid = crypto.randomUUID().slice(0, 8);
+    const rid = createRequestId();
     const start = Date.now();
     this.logger.info("→ POST /api/upload-file", { rid });
 
@@ -662,6 +750,18 @@ export class ApiClient {
       method: "POST",
       body: JSON.stringify({ content }),
     });
+  }
+
+  async getPendingChatTask(sessionId: string): Promise<ChatPendingTask> {
+    return this.fetch(`/api/chat/sessions/${sessionId}/pending-task`);
+  }
+
+  async listPendingChatTasks(): Promise<PendingChatTasksResponse> {
+    return this.fetch(`/api/chat/pending-tasks`);
+  }
+
+  async markChatSessionRead(sessionId: string): Promise<void> {
+    await this.fetch(`/api/chat/sessions/${sessionId}/read`, { method: "POST" });
   }
 
   async cancelTaskById(taskId: string): Promise<void> {
@@ -728,5 +828,63 @@ export class ApiClient {
       method: "PUT",
       body: JSON.stringify(data),
     });
+  }
+
+  // Autopilots
+  async listAutopilots(params?: { status?: string }): Promise<ListAutopilotsResponse> {
+    const search = new URLSearchParams();
+    if (params?.status) search.set("status", params.status);
+    return this.fetch(`/api/autopilots?${search}`);
+  }
+
+  async getAutopilot(id: string): Promise<GetAutopilotResponse> {
+    return this.fetch(`/api/autopilots/${id}`);
+  }
+
+  async createAutopilot(data: CreateAutopilotRequest): Promise<Autopilot> {
+    return this.fetch("/api/autopilots", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateAutopilot(id: string, data: UpdateAutopilotRequest): Promise<Autopilot> {
+    return this.fetch(`/api/autopilots/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteAutopilot(id: string): Promise<void> {
+    await this.fetch(`/api/autopilots/${id}`, { method: "DELETE" });
+  }
+
+  async triggerAutopilot(id: string): Promise<AutopilotRun> {
+    return this.fetch(`/api/autopilots/${id}/trigger`, { method: "POST" });
+  }
+
+  async listAutopilotRuns(id: string, params?: { limit?: number; offset?: number }): Promise<ListAutopilotRunsResponse> {
+    const search = new URLSearchParams();
+    if (params?.limit) search.set("limit", params.limit.toString());
+    if (params?.offset) search.set("offset", params.offset.toString());
+    return this.fetch(`/api/autopilots/${id}/runs?${search}`);
+  }
+
+  async createAutopilotTrigger(autopilotId: string, data: CreateAutopilotTriggerRequest): Promise<AutopilotTrigger> {
+    return this.fetch(`/api/autopilots/${autopilotId}/triggers`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateAutopilotTrigger(autopilotId: string, triggerId: string, data: UpdateAutopilotTriggerRequest): Promise<AutopilotTrigger> {
+    return this.fetch(`/api/autopilots/${autopilotId}/triggers/${triggerId}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteAutopilotTrigger(autopilotId: string, triggerId: string): Promise<void> {
+    await this.fetch(`/api/autopilots/${autopilotId}/triggers/${triggerId}`, { method: "DELETE" });
   }
 }

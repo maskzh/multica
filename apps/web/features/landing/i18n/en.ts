@@ -126,7 +126,7 @@ export const en: LandingDict = {
       {
         title: "Install the CLI & connect your machine",
         description:
-          "Run multica login to authenticate, then multica daemon start. The daemon auto-detects Claude Code, Codex, OpenClaw, and OpenCode on your machine \u2014 plug in and go.",
+          "Run multica setup to configure, authenticate, and start the daemon. It auto-detects Claude Code, Codex, OpenClaw, and OpenCode on your machine \u2014 plug in and go.",
       },
       {
         title: "Create your first agent",
@@ -230,7 +230,7 @@ export const en: LandingDict = {
         links: [
           { label: "Documentation", href: githubUrl },
           { label: "API", href: githubUrl },
-          { label: "X (Twitter)", href: "https://x.com/multica_hq" },
+          { label: "X (Twitter)", href: "https://x.com/MulticaAI" },
         ],
       },
       company: {
@@ -277,6 +277,113 @@ export const en: LandingDict = {
       fixes: "Bug Fixes",
     },
     entries: [
+      {
+        version: "0.1.33",
+        date: "2026-04-14",
+        title: "Gemini CLI & Agent Env Vars",
+        changes: [],
+        features: [
+          "Google Gemini CLI as a new agent runtime with live log streaming",
+          "Custom environment variables for agents (router/proxy mode) with dedicated settings tab",
+          "\"Set parent issue\" and \"Add sub-issue\" actions in issue context menu",
+          "CLI `--parent` flag for issue update and `--content-stdin` for piping comment content",
+          "Sub-issues inherit parent project automatically",
+        ],
+        improvements: [
+          "Editor bubble menu and link preview rewritten for reliability",
+          "OpenClaw backend P0+P1 improvements (multi-line JSON, incremental parsing)",
+          "Self-hosted WebSocket URL auto-derived for LAN access",
+        ],
+        fixes: [
+          "S3 upload keys scoped by workspace (security)",
+          "Workspace membership validation for subscriptions and uploads (security)",
+          "Active tasks auto-cancelled when issue status changes to cancelled",
+          "Agent task stall when process hangs on stdout",
+          "Daemon trigger prompt now embeds the actual triggering comment content",
+          "Login and dashboard redirect stability improvements",
+        ],
+      },
+      {
+        version: "0.1.28",
+        date: "2026-04-13",
+        title: "Windows Support, Auth & Onboarding",
+        changes: [],
+        features: [
+          "Windows support — CLI installation, daemon, and release builds",
+          "Auth migrated to HttpOnly Cookie with WebSocket Origin whitelist",
+          "Full-screen onboarding wizard for new workspaces",
+          "Resizable Master Agent chat window with session history improvements",
+          "Token usage log scanning for OpenCode, OpenClaw, and Hermes runtimes",
+        ],
+        fixes: [
+          "WebSocket first-message authentication security fix",
+          "Content-Security-Policy response header",
+          "Sub-issue progress computed from database instead of paginated client cache",
+        ],
+      },
+      {
+        version: "0.1.27",
+        date: "2026-04-12",
+        title: "One-Click Setup, Self-Hosting & Stability",
+        changes: [],
+        features: [
+          "One-click install & setup — `curl | bash` installs CLI, `--with-server` bootstraps full self-hosting, `multica setup` configures your environment",
+          "Self-hosted storage — local file fallback when S3 is unavailable, plus custom S3 endpoint support (MinIO)",
+          "Inline property editing (priority, status, lead) on project list page",
+        ],
+        improvements: [
+          "Stale agent tasks auto-swept; agent live card shows immediately without waiting for first message",
+          "Comment attachments uploaded via CLI now visible in the UI",
+          "Pinned items scoped per user with fixed sidebar pin action",
+        ],
+        fixes: [
+          "Workspace ownership checks on daemon API routes and attachment uploads",
+          "Markdown sanitizer preserves code blocks from HTML entity escaping",
+          "Next.js upgraded to ^16.2.3 for CVE-2026-23869",
+          "OpenClaw backend rewritten to match actual CLI interface",
+        ],
+      },
+      {
+        version: "0.1.24",
+        date: "2026-04-11",
+        title: "Security & Notifications",
+        changes: [],
+        features: [
+          "Parent issue subscribers notified on sub-issue changes",
+          "CLI `--project` filter for issue list",
+        ],
+        improvements: [
+          "Meta-skill workflow defers to agent Skills instead of hardcoded logic",
+        ],
+        fixes: [
+          "Workspace ownership checks on all daemon API routes",
+          "Workspace ownership validation for attachment uploads and queries",
+          "Reply mentions no longer inherit parent thread's agent mentions",
+          "Agent comment creation missing workspace ID",
+          "Self-hosting Docker build failures (file permissions, CRLF, missing deps)",
+        ],
+      },
+      {
+        version: "0.1.23",
+        date: "2026-04-11",
+        title: "Pinning, Cmd+K & Projects",
+        changes: [],
+        features: [
+          "Pin issues and projects to sidebar with drag-and-drop reordering",
+          "Cmd+K command palette — recent issues, page navigation, and project search",
+          "Project detail sidebar with properties panel (replaces overview tab)",
+          "Project filter in Issues tab",
+          "Project completion progress in project list",
+          "Auto-fill project when creating issue via 'C' shortcut on project page",
+          "Assignee dropdown sorted by user's assignment frequency",
+        ],
+        fixes: [
+          "Markdown XSS — sanitize HTML rendering in comments with rehype-sanitize and server-side bluemonday",
+          "Project kanban issue counts incorrect",
+          "Self-hosting Docker build missing tsconfig dependencies",
+          "Cmd+K requiring double ESC to close",
+        ],
+      },
       {
         version: "0.1.22",
         date: "2026-04-10",

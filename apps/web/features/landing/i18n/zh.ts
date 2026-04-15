@@ -126,7 +126,7 @@ export const zh: LandingDict = {
       {
         title: "\u5b89\u88c5 CLI \u5e76\u8fde\u63a5\u4f60\u7684\u673a\u5668",
         description:
-          "\u8fd0\u884c multica login \u8fdb\u884c\u8ba4\u8bc1\uff0c\u7136\u540e multica daemon start\u3002\u5b88\u62a4\u8fdb\u7a0b\u81ea\u52a8\u68c0\u6d4b\u4f60\u673a\u5668\u4e0a\u7684 Claude Code\u3001Codex\u3001OpenClaw \u548c OpenCode\u2014\u2014\u63d2\u4e0a\u5c31\u7528\u3002",
+          "运行 multica setup 一键完成配置、认证和启动。守护进程自动检测你机器上的 Claude Code、Codex、OpenClaw 和 OpenCode——插上就用。",
       },
       {
         title: "\u521b\u5efa\u4f60\u7684\u7b2c\u4e00\u4e2a Agent",
@@ -230,7 +230,7 @@ export const zh: LandingDict = {
         links: [
           { label: "\u6587\u6863", href: githubUrl },
           { label: "API", href: githubUrl },
-          { label: "X (Twitter)", href: "https://x.com/multica_hq" },
+          { label: "X (Twitter)", href: "https://x.com/MulticaAI" },
         ],
       },
       company: {
@@ -277,6 +277,113 @@ export const zh: LandingDict = {
       fixes: "问题修复",
     },
     entries: [
+      {
+        version: "0.1.33",
+        date: "2026-04-14",
+        title: "Gemini CLI 与 Agent 环境变量",
+        changes: [],
+        features: [
+          "Google Gemini CLI 作为新的 Agent 运行时，支持实时日志流",
+          "Agent 自定义环境变量（router/proxy 模式），新增专用设置标签页",
+          "Issue 右键菜单新增「设置父 Issue」和「添加子 Issue」",
+          "CLI `--parent` 更新父 Issue，`--content-stdin` 管道输入评论内容",
+          "子 Issue 自动继承父级项目",
+        ],
+        improvements: [
+          "编辑器气泡菜单和链接预览重写",
+          "OpenClaw 后端 P0+P1 优化（多行 JSON、增量解析）",
+          "自部署 WebSocket URL 自动适配局域网访问",
+        ],
+        fixes: [
+          "S3 上传路径按工作区隔离（安全）",
+          "订阅和上传新增工作区成员身份校验（安全）",
+          "Issue 状态改为已取消时自动终止进行中的任务",
+          "Agent 进程 stdout 挂起导致任务卡住",
+          "Daemon 触发提示现在嵌入实际的触发评论内容",
+          "登录和仪表盘跳转稳定性改进",
+        ],
+      },
+      {
+        version: "0.1.28",
+        date: "2026-04-13",
+        title: "Windows 支持、认证与引导",
+        changes: [],
+        features: [
+          "Windows 支持——CLI 安装、Daemon 运行和发布构建",
+          "认证迁移至 HttpOnly Cookie，WebSocket 新增 Origin 白名单",
+          "新工作区全屏引导向导",
+          "Master Agent 聊天窗口可调整大小，会话历史体验优化",
+          "OpenCode、OpenClaw 和 Hermes 运行时 Token 用量日志扫描",
+        ],
+        fixes: [
+          "WebSocket 首条消息认证安全修复",
+          "新增 Content-Security-Policy 响应头",
+          "子 Issue 进度改为从数据库计算而非分页客户端缓存",
+        ],
+      },
+      {
+        version: "0.1.27",
+        date: "2026-04-12",
+        title: "一键安装、自部署与稳定性",
+        changes: [],
+        features: [
+          "一键安装与配置——`curl | bash` 安装 CLI，`--with-server` 完整自部署，`multica setup` 配置连接环境",
+          "自部署存储——无 S3 时本地文件存储回退，支持自定义 S3 端点（MinIO）",
+          "项目列表页支持行内编辑属性（优先级、状态、负责人）",
+        ],
+        improvements: [
+          "过期 Agent 任务自动清扫；执行卡片立即显示，无需等待首条消息",
+          "通过 CLI 上传的评论附件现在可在 UI 中显示",
+          "置顶项按用户隔离，修复侧边栏置顶操作",
+        ],
+        fixes: [
+          "Daemon API 路由和附件上传新增工作区所有权校验",
+          "Markdown 清洗器保留代码块不被 HTML 实体转义",
+          "Next.js 升级至 ^16.2.3 修复 CVE-2026-23869",
+          "OpenClaw 后端重写以匹配实际 CLI 接口",
+        ],
+      },
+      {
+        version: "0.1.24",
+        date: "2026-04-11",
+        title: "安全加固与通知",
+        changes: [],
+        features: [
+          "子 Issue 变更时通知父 Issue 的订阅者",
+          "CLI `--project` 筛选 Issue 列表",
+        ],
+        improvements: [
+          "Meta-skill 工作流改为委托 Agent Skills 而非硬编码逻辑",
+        ],
+        fixes: [
+          "Daemon API 路由新增工作区所有权校验",
+          "附件上传和查询新增工作区所有权验证",
+          "回复评论不再继承父级线程的 Agent 提及",
+          "Agent 创建评论缺少 workspace ID",
+          "自部署 Docker 构建问题修复（文件权限、CRLF 换行、缺失依赖）",
+        ],
+      },
+      {
+        version: "0.1.23",
+        date: "2026-04-11",
+        title: "置顶、Cmd+K 与项目增强",
+        changes: [],
+        features: [
+          "Issue 和项目置顶到侧边栏，支持拖拽排序",
+          "Cmd+K 命令面板——最近访问的 Issue、页面导航、项目搜索",
+          "项目详情侧边栏属性面板（替代原概览标签页）",
+          "Issues 列表新增项目筛选",
+          "项目列表显示完成进度",
+          "在项目页按 'C' 创建 Issue 时自动填充项目",
+          "指派人下拉按用户分配频率排序",
+        ],
+        fixes: [
+          "Markdown XSS 漏洞——评论渲染增加 rehype-sanitize 和服务端 bluemonday 清洗",
+          "项目看板 Issue 计数不正确",
+          "自部署 Docker 构建缺少 tsconfig 依赖",
+          "Cmd+K 需要按两次 ESC 才能关闭",
+        ],
+      },
       {
         version: "0.1.22",
         date: "2026-04-10",

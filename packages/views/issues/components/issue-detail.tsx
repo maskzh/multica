@@ -5,6 +5,8 @@ import { useDefaultLayout, usePanelRef } from "react-resizable-panels";
 import { AppLink } from "../../navigation";
 import { useNavigation } from "../../navigation";
 import {
+  ArrowDown,
+  ArrowUp,
   Calendar,
   ChevronDown,
   ChevronLeft,
@@ -52,10 +54,10 @@ import {
 } from "@multica/ui/components/ui/tooltip";
 import { Popover, PopoverTrigger, PopoverContent } from "@multica/ui/components/ui/popover";
 import { Checkbox } from "@multica/ui/components/ui/checkbox";
-import { Command, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem } from "@multica/ui/components/ui/command";
+import { Command, CommandDialog, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem } from "@multica/ui/components/ui/command";
 import { AvatarGroup, AvatarGroupCount } from "@multica/ui/components/ui/avatar";
 import { ActorAvatar } from "../../common/actor-avatar";
-import type { UpdateIssueRequest, IssueStatus, IssuePriority, TimelineEntry } from "@multica/core/types";
+import type { UpdateIssueRequest, IssueStatus, IssuePriority, TimelineEntry, Issue } from "@multica/core/types";
 import { ALL_STATUSES, STATUS_CONFIG, PRIORITY_ORDER, PRIORITY_CONFIG } from "@multica/core/issues/config";
 import { StatusIcon, PriorityIcon, StatusPicker, PriorityPicker, DueDatePicker, AssigneePicker, canAssignAgent } from ".";
 import { ProjectPicker } from "../../projects/components/project-picker";
@@ -175,6 +177,132 @@ function PropRow({
 
 
 // ---------------------------------------------------------------------------
+// Issue Picker Dialog
+// ---------------------------------------------------------------------------
+
+function IssuePickerDialog({
+  open,
+  onOpenChange,
+  title,
+  description,
+  excludeIds,
+  onSelect,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  title: string;
+  description: string;
+  excludeIds: string[];
+  onSelect: (issue: Issue) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<Issue[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const abortRef = useRef<AbortController>(undefined);
+
+  // Reset state when dialog opens/closes
+  useEffect(() => {
+    if (!open) {
+      setQuery("");
+      setResults([]);
+      setIsLoading(false);
+    }
+  }, [open]);
+
+  const search = useCallback(
+    (q: string) => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      if (abortRef.current) abortRef.current.abort();
+
+      if (!q.trim()) {
+        setResults([]);
+        setIsLoading(false);
+        return;
+      }
+
+      setIsLoading(true);
+      debounceRef.current = setTimeout(async () => {
+        const controller = new AbortController();
+        abortRef.current = controller;
+        try {
+          const res = await api.searchIssues({
+            q: q.trim(),
+            limit: 20,
+            include_closed: true,
+            signal: controller.signal,
+          });
+          if (!controller.signal.aborted) {
+            setResults(
+              res.issues.filter((i) => !excludeIds.includes(i.id)),
+            );
+            setIsLoading(false);
+          }
+        } catch {
+          if (!controller.signal.aborted) {
+            setIsLoading(false);
+          }
+        }
+      }, 300);
+    },
+    [excludeIds],
+  );
+
+  return (
+    <CommandDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title={title}
+      description={description}
+    >
+      <Command shouldFilter={false}>
+        <CommandInput
+          placeholder="Search issues..."
+          value={query}
+          onValueChange={(v) => {
+            setQuery(v);
+            search(v);
+          }}
+        />
+        <CommandList>
+          {isLoading && (
+            <div className="py-6 text-center text-sm text-muted-foreground">
+              Searching...
+            </div>
+          )}
+          {!isLoading && query.trim() && results.length === 0 && (
+            <CommandEmpty>No issues found.</CommandEmpty>
+          )}
+          {!isLoading && !query.trim() && (
+            <div className="py-6 text-center text-sm text-muted-foreground">
+              Type to search issues
+            </div>
+          )}
+          {results.length > 0 && (
+            <CommandGroup>
+              {results.map((issue) => (
+                <CommandItem
+                  key={issue.id}
+                  value={issue.id}
+                  onSelect={() => {
+                    onSelect(issue);
+                    onOpenChange(false);
+                  }}
+                >
+                  <StatusIcon status={issue.status} className="h-3.5 w-3.5 shrink-0" />
+                  <span className="text-muted-foreground shrink-0">{issue.identifier}</span>
+                  <span className="truncate">{issue.title}</span>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          )}
+        </CommandList>
+      </Command>
+    </CommandDialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Props
 // ---------------------------------------------------------------------------
 
@@ -195,6 +323,7 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
   const id = issueId;
   const router = useNavigation();
   const user = useAuthStore((s) => s.user);
+  const userId = useAuthStore((s) => s.user?.id);
   const workspace = useWorkspaceStore((s) => s.workspace);
 
   // Issue navigation — read from TQ list cache
@@ -220,6 +349,8 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const didHighlightRef = useRef<string | null>(null);
+  const [parentPickerOpen, setParentPickerOpen] = useState(false);
+  const [childPickerOpen, setChildPickerOpen] = useState(false);
 
   // Issue data from TQ — uses detail query, seeded from list cache if available.
   // Only seed when description is present; list API omits it, and ContentEditor
@@ -236,12 +367,7 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
   const recordVisit = useRecentIssuesStore((s) => s.recordVisit);
   useEffect(() => {
     if (issue) {
-      recordVisit({
-        id: issue.id,
-        identifier: issue.identifier,
-        title: issue.title,
-        status: issue.status,
-      });
+      recordVisit(issue.id);
     }
   }, [issue?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -264,7 +390,10 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
   const { data: usage } = useQuery(issueUsageOptions(id));
 
   // Pinned state
-  const { data: pinnedItems = [] } = useQuery(pinListOptions(wsId));
+  const { data: pinnedItems = [] } = useQuery({
+    ...pinListOptions(wsId, userId ?? ""),
+    enabled: !!userId,
+  });
   const isPinned = pinnedItems.some((p) => p.item_type === "issue" && p.item_id === id);
   const createPin = useCreatePin();
   const deletePin = useDeletePin();
@@ -501,7 +630,7 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
                       }
                     }}
                   >
-                    {isPinned ? <PinOff className="h-4 w-4" /> : <Pin className="h-4 w-4" />}
+                    {isPinned ? <PinOff /> : <Pin />}
                   </Button>
                 }
               />
@@ -641,6 +770,18 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
                   Create sub-issue
                 </DropdownMenuItem>
 
+                {/* Add as sub-issue of another issue */}
+                <DropdownMenuItem onClick={() => setParentPickerOpen(true)}>
+                  <ArrowUp className="h-3.5 w-3.5" />
+                  Set parent issue...
+                </DropdownMenuItem>
+
+                {/* Add another issue as sub-issue */}
+                <DropdownMenuItem onClick={() => setChildPickerOpen(true)}>
+                  <ArrowDown className="h-3.5 w-3.5" />
+                  Add sub-issue...
+                </DropdownMenuItem>
+
                 {/* Pin / Unpin */}
                 <DropdownMenuItem onClick={() => {
                   if (isPinned) {
@@ -720,6 +861,35 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
                 </AlertDialogFooter>
               </AlertDialogContent>
             </AlertDialog>
+
+            {/* Set parent issue picker */}
+            <IssuePickerDialog
+              open={parentPickerOpen}
+              onOpenChange={setParentPickerOpen}
+              title="Set parent issue"
+              description="Search for an issue to set as the parent of this issue"
+              excludeIds={[id, ...childIssues.map((c) => c.id)]}
+              onSelect={(selected) => {
+                handleUpdateField({ parent_issue_id: selected.id });
+                toast.success(`Set ${selected.identifier} as parent issue`);
+              }}
+            />
+
+            {/* Add sub-issue picker */}
+            <IssuePickerDialog
+              open={childPickerOpen}
+              onOpenChange={setChildPickerOpen}
+              title="Add sub-issue"
+              description="Search for an issue to add as a sub-issue"
+              excludeIds={[id, ...(parentIssueId ? [parentIssueId] : []), ...childIssues.map((c) => c.id)]}
+              onSelect={(selected) => {
+                updateIssueMutation.mutate(
+                  { id: selected.id, parent_issue_id: id },
+                  { onError: () => toast.error("Failed to add sub-issue") },
+                );
+                toast.success(`Added ${selected.identifier} as sub-issue`);
+              }}
+            />
           </div>
 
         {/* Content — scrollable */}

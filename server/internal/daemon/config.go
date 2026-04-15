@@ -16,10 +16,12 @@ const (
 	DefaultHeartbeatInterval     = 15 * time.Second
 	DefaultAgentTimeout          = 2 * time.Hour
 	DefaultRuntimeName           = "Local Agent"
-	DefaultConfigReloadInterval  = 5 * time.Second
 	DefaultWorkspaceSyncInterval = 30 * time.Second
 	DefaultHealthPort            = 19514
 	DefaultMaxConcurrentTasks    = 20
+	DefaultGCInterval            = 1 * time.Hour
+	DefaultGCTTL                 = 5 * 24 * time.Hour // 5 days
+	DefaultGCOrphanTTL           = 30 * 24 * time.Hour // 30 days
 )
 
 // Config holds all daemon configuration.
@@ -29,12 +31,17 @@ type Config struct {
 	DeviceName         string
 	RuntimeName        string
 	CLIVersion         string                // multica CLI version (e.g. "0.1.13")
+	LaunchedBy         string                // "desktop" when spawned by the Electron app, empty for standalone
 	Profile            string                // profile name (empty = default)
-	Agents             map[string]AgentEntry // "claude" -> entry, "codex" -> entry, "opencode" -> entry, "openclaw" -> entry, "hermes" -> entry
+	Agents             map[string]AgentEntry // keyed by provider: claude, codex, opencode, openclaw, hermes, gemini
 	WorkspacesRoot     string                // base path for execution envs (default: ~/multica_workspaces)
 	KeepEnvAfterTask   bool                  // preserve env after task for debugging
 	HealthPort         int                   // local HTTP port for health checks (default: 19514)
 	MaxConcurrentTasks int                   // max tasks running in parallel (default: 20)
+	GCEnabled          bool                  // enable periodic workspace garbage collection (default: true)
+	GCInterval         time.Duration         // how often the GC loop runs (default: 1h)
+	GCTTL              time.Duration         // clean dirs whose issue is done/canceled and updated_at < now()-TTL (default: 5d)
+	GCOrphanTTL        time.Duration         // clean orphan dirs (no meta or unknown issue) older than this (default: 30d)
 	PollInterval       time.Duration
 	HeartbeatInterval  time.Duration
 	AgentTimeout       time.Duration
@@ -106,21 +113,21 @@ func LoadConfig(overrides Overrides) (Config, error) {
 			Model: strings.TrimSpace(os.Getenv("MULTICA_HERMES_MODEL")),
 		}
 	}
-	zodePath := envOrDefault("MULTICA_ZODE_PATH", "zode")
-	if _, err := exec.LookPath(zodePath); err == nil {
-		agents["zode"] = AgentEntry{
-			Path:  zodePath,
-			Model: strings.TrimSpace(os.Getenv("MULTICA_ZODE_MODEL")),
+	geminiPath := envOrDefault("MULTICA_GEMINI_PATH", "gemini")
+	if _, err := exec.LookPath(geminiPath); err == nil {
+		agents["gemini"] = AgentEntry{
+			Path:  geminiPath,
+			Model: strings.TrimSpace(os.Getenv("MULTICA_GEMINI_MODEL")),
 		}
 	}
 	if len(agents) == 0 {
-		return Config{}, fmt.Errorf("no agent CLI found: install claude, codex, opencode, openclaw, hermes, or zode and ensure it is on PATH")
+		return Config{}, fmt.Errorf("no agent CLI found: install claude, codex, opencode, openclaw, hermes, or gemini and ensure it is on PATH")
 	}
 
 	// Extra agents: MULTICA_EXTRA_AGENTS=name:provider:path,...
 	// Each entry is "name:provider:path" where:
 	//   name     - runtime identifier shown in the UI (e.g. "claude01")
-	//   provider - backend type: claude, codex, opencode, or zode
+	//   provider - backend type: claude, codex, opencode, gemini, etc.
 	//   path     - absolute path or name resolvable via PATH (supports ~)
 	// Example: MULTICA_EXTRA_AGENTS=claude01:claude:~/bin/claude01,claude02:claude:~/bin/claude02
 	if extra := strings.TrimSpace(os.Getenv("MULTICA_EXTRA_AGENTS")); extra != "" {
@@ -195,11 +202,10 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	if overrides.DaemonID != "" {
 		daemonID = overrides.DaemonID
 	}
-	// Suffix daemon ID with profile name to avoid collisions when multiple
-	// daemons register against the same server.
-	if profile != "" && !strings.HasSuffix(daemonID, "-"+profile) {
-		daemonID = daemonID + "-" + profile
-	}
+	// NOTE: daemon_id is intentionally stable (hostname or explicit override).
+	// The unique constraint (workspace_id, daemon_id, provider) already prevents
+	// collisions within the same workspace. Appending the profile name caused
+	// duplicate runtimes when users switched profiles.
 
 	deviceName := envOrDefault("MULTICA_DAEMON_DEVICE_NAME", host)
 	if overrides.DeviceName != "" {
@@ -241,6 +247,24 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	// Keep env after task: env > default (false)
 	keepEnv := os.Getenv("MULTICA_KEEP_ENV_AFTER_TASK") == "true" || os.Getenv("MULTICA_KEEP_ENV_AFTER_TASK") == "1"
 
+	// GC config: env > defaults
+	gcEnabled := true
+	if v := os.Getenv("MULTICA_GC_ENABLED"); v == "false" || v == "0" {
+		gcEnabled = false
+	}
+	gcInterval, err := durationFromEnv("MULTICA_GC_INTERVAL", DefaultGCInterval)
+	if err != nil {
+		return Config{}, err
+	}
+	gcTTL, err := durationFromEnv("MULTICA_GC_TTL", DefaultGCTTL)
+	if err != nil {
+		return Config{}, err
+	}
+	gcOrphanTTL, err := durationFromEnv("MULTICA_GC_ORPHAN_TTL", DefaultGCOrphanTTL)
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		ServerBaseURL:      serverBaseURL,
 		DaemonID:           daemonID,
@@ -250,6 +274,10 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		Agents:             agents,
 		WorkspacesRoot:     workspacesRoot,
 		KeepEnvAfterTask:   keepEnv,
+		GCEnabled:          gcEnabled,
+		GCInterval:         gcInterval,
+		GCTTL:              gcTTL,
+		GCOrphanTTL:        gcOrphanTTL,
 		HealthPort:         healthPort,
 		MaxConcurrentTasks: maxConcurrentTasks,
 		PollInterval:       pollInterval,

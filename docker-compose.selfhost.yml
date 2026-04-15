@@ -36,6 +36,8 @@ services:
         condition: service_healthy
     ports:
       - "${PORT:-8080}:8080"
+    volumes:
+      - backend_uploads:/app/data/uploads
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-multica}:${POSTGRES_PASSWORD:-multica}@postgres:5432/${POSTGRES_DB:-multica}?sslmode=disable
       PORT: "8080"
@@ -61,6 +63,8 @@ services:
       dockerfile: Dockerfile.web
       args:
         REMOTE_API_URL: http://backend:8080
+        NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${NEXT_PUBLIC_GOOGLE_CLIENT_ID:-}
+        NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-}
     depends_on:
       - backend
     ports:
@@ -70,3 +74,4 @@ services:
 
 volumes:
   pgdata:
+  backend_uploads:
