@@ -124,37 +124,6 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		return Config{}, fmt.Errorf("no agent CLI found: install claude, codex, opencode, openclaw, hermes, or gemini and ensure it is on PATH")
 	}
 
-	// Extra agents: MULTICA_EXTRA_AGENTS=name:provider:path,...
-	// Each entry is "name:provider:path" where:
-	//   name     - runtime identifier shown in the UI (e.g. "claude01")
-	//   provider - backend type: claude, codex, opencode, gemini, etc.
-	//   path     - absolute path or name resolvable via PATH (supports ~)
-	// Example: MULTICA_EXTRA_AGENTS=claude01:claude:~/bin/claude01,claude02:claude:~/bin/claude02
-	if extra := strings.TrimSpace(os.Getenv("MULTICA_EXTRA_AGENTS")); extra != "" {
-		for _, entry := range strings.Split(extra, ",") {
-			entry = strings.TrimSpace(entry)
-			if entry == "" {
-				continue
-			}
-			parts := strings.SplitN(entry, ":", 3)
-			if len(parts) != 3 {
-				continue // skip malformed entries
-			}
-			name, provider, rawPath := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), strings.TrimSpace(parts[2])
-			if name == "" || provider == "" || rawPath == "" {
-				continue
-			}
-			resolvedPath, err := resolvePath(rawPath)
-			if err != nil {
-				continue
-			}
-			agents[name] = AgentEntry{
-				Path:     resolvedPath,
-				Provider: provider,
-			}
-		}
-	}
-
 	// Host info
 	host, err := os.Hostname()
 	if err != nil || strings.TrimSpace(host) == "" {
@@ -284,27 +253,6 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		HeartbeatInterval:  heartbeatInterval,
 		AgentTimeout:       agentTimeout,
 	}, nil
-}
-
-// resolvePath expands ~ and resolves the path to an executable.
-// Returns the absolute path or an error if not found.
-func resolvePath(p string) (string, error) {
-	if strings.HasPrefix(p, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		p = filepath.Join(home, p[2:])
-	}
-	// If it's already an absolute path, verify it exists.
-	if filepath.IsAbs(p) {
-		if _, err := os.Stat(p); err != nil {
-			return "", err
-		}
-		return p, nil
-	}
-	// Otherwise look it up on PATH.
-	return exec.LookPath(p)
 }
 
 // NormalizeServerBaseURL converts a WebSocket or HTTP URL to a base HTTP URL.

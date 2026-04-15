@@ -2,9 +2,8 @@ package daemon
 
 // AgentEntry describes a single available agent CLI.
 type AgentEntry struct {
-	Path     string // path to CLI binary
-	Model    string // model override (optional)
-	Provider string // backend provider type (e.g. "claude"); defaults to the map key if empty
+	Path  string // path to CLI binary
+	Model string // model override (optional)
 }
 
 // Runtime represents a registered daemon runtime.
