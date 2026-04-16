@@ -280,6 +280,27 @@ export const zh: LandingDict = {
     },
     entries: [
       {
+        version: "0.2.1",
+        date: "2026-04-16",
+        title: "新增 Agent 运行时",
+        changes: [],
+        features: [
+          "支持 GitHub Copilot CLI 运行时",
+          "支持 Cursor Agent CLI 运行时",
+          "支持 Pi Agent 运行时",
+          "工作区 URL 改造——slug 优先路由（`/{slug}/issues`），旧链接自动重定向",
+        ],
+        fixes: [
+          "Codex 同一 Issue 下跨任务恢复会话线程",
+          "Codex 回合错误正确抛出，不再报告空输出",
+          "工作区用量按任务完成时间正确分桶",
+          "Autopilot 运行历史行整行可点击",
+          "Daemon 和 GC 端点加强工作区隔离校验（安全）",
+          "邀请邮件中的工作区和邀请人名称进行 HTML 转义",
+          "桌面应用开发版和生产版现在可以同时运行",
+        ],
+      },
+      {
         version: "0.2.0",
         date: "2026-04-15",
         title: "桌面应用、Autopilot 与邀请",

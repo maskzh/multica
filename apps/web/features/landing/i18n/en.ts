@@ -280,6 +280,27 @@ export const en: LandingDict = {
     },
     entries: [
       {
+        version: "0.2.1",
+        date: "2026-04-16",
+        title: "New Agent Runtimes",
+        changes: [],
+        features: [
+          "GitHub Copilot CLI runtime support",
+          "Cursor Agent CLI runtime support",
+          "Pi agent runtime support",
+          "Workspace URL refactor — slug-first routing (`/{slug}/issues`) with legacy URL redirects",
+        ],
+        fixes: [
+          "Codex threads resume across tasks on the same issue",
+          "Codex turn errors surfaced instead of reporting empty output",
+          "Workspace usage correctly bucketed by task completion time",
+          "Autopilot run history rows fully clickable",
+          "Workspace isolation enforced on additional daemon and GC endpoints (security)",
+          "HTML-escape workspace and inviter names in invitation emails",
+          "Dev and production desktop instances can now coexist",
+        ],
+      },
+      {
         version: "0.2.0",
         date: "2026-04-15",
         title: "Desktop App, Autopilot & Invitations",
