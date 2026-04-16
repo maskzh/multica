@@ -257,6 +257,290 @@ func TestGetIssueGCCheck_WithDaemonToken_CrossWorkspace(t *testing.T) {
 	}
 }
 
+// withURLParams merges the given chi URL parameters into the request context.
+// Unlike calling withURLParam twice (which replaces the whole chi.RouteContext
+// and loses earlier params), this preserves previously-added params.
+func withURLParams(req *http.Request, kv ...string) *http.Request {
+	rctx := chi.NewRouteContext()
+	if existing, ok := req.Context().Value(chi.RouteCtxKey).(*chi.Context); ok && existing != nil {
+		for i, key := range existing.URLParams.Keys {
+			rctx.URLParams.Add(key, existing.URLParams.Values[i])
+		}
+	}
+	for i := 0; i+1 < len(kv); i += 2 {
+		rctx.URLParams.Add(kv[i], kv[i+1])
+	}
+	return req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+}
+
+// setupForeignWorkspaceFixture creates an isolated workspace (not reachable
+// from testUserID) with its own agent, runtime, issue, and queued task.
+// Returns (issueID, taskID). All rows are cleaned up when the test ends.
+func setupForeignWorkspaceFixture(t *testing.T) (string, string) {
+	t.Helper()
+	ctx := context.Background()
+
+	var foreignWorkspaceID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO workspace (name, slug, description, issue_prefix)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id
+	`, "Foreign Workspace", "foreign-idor-tests", "Cross-tenant IDOR test workspace", "FOR").Scan(&foreignWorkspaceID); err != nil {
+		t.Fatalf("setup: create foreign workspace: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM workspace WHERE id = $1`, foreignWorkspaceID)
+	})
+
+	var runtimeID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_runtime (
+			workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at
+		)
+		VALUES ($1, NULL, $2, 'cloud', $3, 'online', $4, '{}'::jsonb, now())
+		RETURNING id
+	`, foreignWorkspaceID, "Foreign Runtime", "foreign_runtime", "Foreign runtime").Scan(&runtimeID); err != nil {
+		t.Fatalf("setup: create foreign runtime: %v", err)
+	}
+
+	var agentID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent (
+			workspace_id, name, description, runtime_mode, runtime_config,
+			runtime_id, visibility, max_concurrent_tasks
+		)
+		VALUES ($1, $2, '', 'cloud', '{}'::jsonb, $3, 'workspace', 1)
+		RETURNING id
+	`, foreignWorkspaceID, "Foreign Agent", runtimeID).Scan(&agentID); err != nil {
+		t.Fatalf("setup: create foreign agent: %v", err)
+	}
+
+	var issueID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO issue (workspace_id, title, status, priority, creator_id, creator_type)
+		VALUES ($1, 'foreign-workspace-issue', 'todo', 'medium', $2, 'agent')
+		RETURNING id
+	`, foreignWorkspaceID, agentID).Scan(&issueID); err != nil {
+		t.Fatalf("setup: create foreign issue: %v", err)
+	}
+
+	var taskID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (agent_id, issue_id, status, runtime_id)
+		VALUES ($1, $2, 'queued', $3)
+		RETURNING id
+	`, agentID, issueID, runtimeID).Scan(&taskID); err != nil {
+		t.Fatalf("setup: create foreign task: %v", err)
+	}
+
+	return issueID, taskID
+}
+
+// TestGetActiveTaskForIssue_CrossWorkspace_Returns404 verifies that a member of
+// workspace A cannot discover tasks for an issue in workspace B by passing
+// B's issue UUID in the URL while keeping A in X-Workspace-ID.
+func TestGetActiveTaskForIssue_CrossWorkspace_Returns404(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	foreignIssueID, _ := setupForeignWorkspaceFixture(t)
+
+	w := httptest.NewRecorder()
+	req := newRequest("GET", "/api/issues/"+foreignIssueID+"/active-task", nil)
+	req = withURLParam(req, "id", foreignIssueID)
+
+	testHandler.GetActiveTaskForIssue(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("GetActiveTaskForIssue with cross-workspace issueId: expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestCancelTask_CrossWorkspace_Returns404 verifies that a member of workspace
+// A cannot cancel a task that lives in workspace B. Critically, the task must
+// remain in its original status — no side effect before the access check.
+func TestCancelTask_CrossWorkspace_Returns404(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	foreignIssueID, foreignTaskID := setupForeignWorkspaceFixture(t)
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues/"+foreignIssueID+"/tasks/"+foreignTaskID+"/cancel", nil)
+	req = withURLParams(req, "id", foreignIssueID, "taskId", foreignTaskID)
+
+	testHandler.CancelTask(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("CancelTask with cross-workspace issueId/taskId: expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// The foreign task must not have been cancelled.
+	var status string
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT status FROM agent_task_queue WHERE id = $1`, foreignTaskID,
+	).Scan(&status); err != nil {
+		t.Fatalf("read foreign task status: %v", err)
+	}
+	if status != "queued" {
+		t.Fatalf("foreign task status was mutated: expected 'queued', got %q", status)
+	}
+}
+
+// TestCancelTask_TaskBelongsToDifferentIssue_Returns404 verifies that a task
+// UUID belonging to a *different* issue in the *same* accessible workspace
+// cannot be cancelled by routing it through another issue's URL. This guards
+// against the weaker fix that only validates the issue→workspace binding.
+func TestCancelTask_TaskBelongsToDifferentIssue_Returns404(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	ctx := context.Background()
+
+	var agentID, runtimeID string
+	if err := testPool.QueryRow(ctx,
+		`SELECT id, runtime_id FROM agent WHERE workspace_id = $1 LIMIT 1`,
+		testWorkspaceID,
+	).Scan(&agentID, &runtimeID); err != nil {
+		t.Fatalf("setup: get agent: %v", err)
+	}
+
+	// Issue X — the task's real parent.
+	var issueXID, taskID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO issue (workspace_id, title, status, priority, creator_id, creator_type, number, position)
+		VALUES ($1, 'cancel-crossissue-x', 'todo', 'medium', $2, 'member', 91001, 0)
+		RETURNING id
+	`, testWorkspaceID, testUserID).Scan(&issueXID); err != nil {
+		t.Fatalf("setup: create issue X: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM issue WHERE id = $1`, issueXID) })
+
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (agent_id, issue_id, status, runtime_id)
+		VALUES ($1, $2, 'queued', $3)
+		RETURNING id
+	`, agentID, issueXID, runtimeID).Scan(&taskID); err != nil {
+		t.Fatalf("setup: create task: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, taskID) })
+
+	// Issue Y — a sibling in the same workspace, used only as the URL cover.
+	var issueYID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO issue (workspace_id, title, status, priority, creator_id, creator_type, number, position)
+		VALUES ($1, 'cancel-crossissue-y', 'todo', 'medium', $2, 'member', 91002, 0)
+		RETURNING id
+	`, testWorkspaceID, testUserID).Scan(&issueYID); err != nil {
+		t.Fatalf("setup: create issue Y: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM issue WHERE id = $1`, issueYID) })
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues/"+issueYID+"/tasks/"+taskID+"/cancel", nil)
+	req = withURLParams(req, "id", issueYID, "taskId", taskID)
+
+	testHandler.CancelTask(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("CancelTask with mismatched issueId/taskId: expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var status string
+	if err := testPool.QueryRow(ctx,
+		`SELECT status FROM agent_task_queue WHERE id = $1`, taskID,
+	).Scan(&status); err != nil {
+		t.Fatalf("read task status: %v", err)
+	}
+	if status != "queued" {
+		t.Fatalf("task status was mutated: expected 'queued', got %q", status)
+	}
+}
+
+// TestCancelTask_SameIssue_Succeeds is the happy-path companion to the two
+// negative tests above — same workspace, correct issue→task pairing → 200.
+func TestCancelTask_SameIssue_Succeeds(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	ctx := context.Background()
+
+	var agentID, runtimeID string
+	if err := testPool.QueryRow(ctx,
+		`SELECT id, runtime_id FROM agent WHERE workspace_id = $1 LIMIT 1`,
+		testWorkspaceID,
+	).Scan(&agentID, &runtimeID); err != nil {
+		t.Fatalf("setup: get agent: %v", err)
+	}
+
+	var issueID, taskID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO issue (workspace_id, title, status, priority, creator_id, creator_type, number, position)
+		VALUES ($1, 'cancel-happy-path', 'todo', 'medium', $2, 'member', 91003, 0)
+		RETURNING id
+	`, testWorkspaceID, testUserID).Scan(&issueID); err != nil {
+		t.Fatalf("setup: create issue: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM issue WHERE id = $1`, issueID) })
+
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (agent_id, issue_id, status, runtime_id)
+		VALUES ($1, $2, 'queued', $3)
+		RETURNING id
+	`, agentID, issueID, runtimeID).Scan(&taskID); err != nil {
+		t.Fatalf("setup: create task: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, taskID) })
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues/"+issueID+"/tasks/"+taskID+"/cancel", nil)
+	req = withURLParams(req, "id", issueID, "taskId", taskID)
+
+	testHandler.CancelTask(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("CancelTask with matching issueId/taskId: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestListTasksByIssue_CrossWorkspace_Returns404 verifies that task history
+// is not readable across workspaces via a bare issue UUID.
+func TestListTasksByIssue_CrossWorkspace_Returns404(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	foreignIssueID, _ := setupForeignWorkspaceFixture(t)
+
+	w := httptest.NewRecorder()
+	req := newRequest("GET", "/api/issues/"+foreignIssueID+"/task-runs", nil)
+	req = withURLParam(req, "id", foreignIssueID)
+
+	testHandler.ListTasksByIssue(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("ListTasksByIssue with cross-workspace issueId: expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestGetIssueUsage_CrossWorkspace_Returns404 verifies that per-issue token
+// usage is not readable across workspaces via a bare issue UUID.
+func TestGetIssueUsage_CrossWorkspace_Returns404(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	foreignIssueID, _ := setupForeignWorkspaceFixture(t)
+
+	w := httptest.NewRecorder()
+	req := newRequest("GET", "/api/issues/"+foreignIssueID+"/usage", nil)
+	req = withURLParam(req, "id", foreignIssueID)
+
+	testHandler.GetIssueUsage(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("GetIssueUsage with cross-workspace issueId: expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestGetDaemonWorkspaceRepos_WithDaemonToken(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("database not available")
