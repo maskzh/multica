@@ -1,10 +1,15 @@
-import { app, shell, BrowserWindow, ipcMain } from "electron";
+import { app, shell, BrowserWindow, ipcMain, nativeImage } from "electron";
 import { homedir } from "os";
 import { join } from "path";
 import { electronApp, optimizer, is } from "@electron-toolkit/utils";
 import fixPath from "fix-path";
 import { setupAutoUpdater } from "./updater";
 import { setupDaemonManager } from "./daemon-manager";
+
+// Bundled icon used for dev-mode dock/taskbar branding. In production the
+// app bundle icon (from electron-builder) wins; this path is only consumed
+// by the `is.dev` branch below.
+const DEV_ICON_PATH = join(__dirname, "../../resources/icon.png");
 
 // macOS/Linux GUI launches inherit a minimal PATH from launchd that omits
 // the user's shell config (~/.zshrc, Homebrew, nvm, ~/.local/bin, etc.).
@@ -61,6 +66,9 @@ function createWindow(): void {
     trafficLightPosition: { x: 16, y: 13 },
     show: false,
     autoHideMenuBar: true,
+    // Windows/Linux pick up the window/taskbar icon from this option in
+    // dev — on macOS it's ignored (dock comes from app.dock.setIcon below).
+    ...(is.dev ? { icon: DEV_ICON_PATH } : {}),
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
       sandbox: false,
@@ -101,9 +109,11 @@ function createWindow(): void {
 // is derived from the userData path. (Same approach VS Code uses for
 // Stable / Insiders coexistence.)
 
+const DEV_APP_NAME = "Multica Canary";
+
 if (is.dev) {
-  app.setName("Multica Dev");
-  app.setPath("userData", join(app.getPath("appData"), "Multica Dev"));
+  app.setName(DEV_APP_NAME);
+  app.setPath("userData", join(app.getPath("appData"), DEV_APP_NAME));
 }
 
 // --- Protocol registration -----------------------------------------------
@@ -140,6 +150,14 @@ if (!gotTheLock) {
     electronApp.setAppUserModelId(
       is.dev ? "ai.multica.desktop.dev" : "ai.multica.desktop",
     );
+
+    // macOS: replace the default Electron dock icon with the bundled logo
+    // so the Canary dev build is visually distinct from a stock Electron
+    // run. `app.dock` is macOS-only — guard the call.
+    if (is.dev && process.platform === "darwin" && app.dock) {
+      const icon = nativeImage.createFromPath(DEV_ICON_PATH);
+      if (!icon.isEmpty()) app.dock.setIcon(icon);
+    }
 
     app.on("browser-window-created", (_, window) => {
       optimizer.watchWindowShortcuts(window);
