@@ -15,10 +15,15 @@ interface Env {
   // Worker secrets — set via: wrangler secret put <NAME>
   DATABASE_URL: string;
   JWT_SECRET: string;
+  AWS_ACCESS_KEY_ID: string;
+  AWS_SECRET_ACCESS_KEY: string;
   // Worker vars (non-sensitive)
   FRONTEND_ORIGIN: string;
   CORS_ALLOWED_ORIGINS: string;
   GOOGLE_REDIRECT_URI: string;
+  S3_BUCKET: string;
+  S3_REGION: string;
+  AWS_ENDPOINT_URL: string;
 }
 
 const BACKEND_PREFIXES = ["/api/", "/auth/", "/health"];
@@ -46,10 +51,11 @@ export default {
           JWT_SECRET: env.JWT_SECRET,
           FRONTEND_ORIGIN: env.FRONTEND_ORIGIN,
           CORS_ALLOWED_ORIGINS: env.CORS_ALLOWED_ORIGINS,
-          RESEND_API_KEY: "",
-          GOOGLE_CLIENT_ID: "",
-          GOOGLE_CLIENT_SECRET: "",
-          GOOGLE_REDIRECT_URI: env.GOOGLE_REDIRECT_URI,
+          S3_BUCKET: env.S3_BUCKET,
+          S3_REGION: env.S3_REGION,
+          AWS_ENDPOINT_URL: env.AWS_ENDPOINT_URL,
+          AWS_ACCESS_KEY_ID: env.AWS_ACCESS_KEY_ID,
+          AWS_SECRET_ACCESS_KEY: env.AWS_SECRET_ACCESS_KEY,
         },
       });
       return backend.fetch(request);
