@@ -7,20 +7,24 @@ import { Label } from "@multica/ui/components/ui/label";
 import { Button } from "@multica/ui/components/ui/button";
 import { Card, CardContent } from "@multica/ui/components/ui/card";
 import { useCreateWorkspace } from "@multica/core/workspace/mutations";
+import type { Workspace } from "@multica/core/types";
 import {
   WORKSPACE_SLUG_CONFLICT_ERROR,
   WORKSPACE_SLUG_FORMAT_ERROR,
   WORKSPACE_SLUG_REGEX,
   isWorkspaceSlugConflict,
   nameToWorkspaceSlug,
-} from "../workspace/slug";
+} from "./slug";
 
-export function StepWorkspace({ onNext }: { onNext: () => void }) {
+export interface CreateWorkspaceFormProps {
+  onSuccess: (workspace: Workspace) => void;
+}
+
+export function CreateWorkspaceForm({ onSuccess }: CreateWorkspaceFormProps) {
   const createWorkspace = useCreateWorkspace();
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
   const [slugServerError, setSlugServerError] = useState<string | null>(null);
-  // Track whether the user has manually edited the slug field.
   const slugTouched = useRef(false);
 
   const slugValidationError =
@@ -28,7 +32,6 @@ export function StepWorkspace({ onNext }: { onNext: () => void }) {
       ? WORKSPACE_SLUG_FORMAT_ERROR
       : null;
   const slugError = slugValidationError ?? slugServerError;
-
   const canSubmit =
     name.trim().length > 0 && slug.trim().length > 0 && !slugError;
 
@@ -51,7 +54,7 @@ export function StepWorkspace({ onNext }: { onNext: () => void }) {
     createWorkspace.mutate(
       { name: name.trim(), slug: slug.trim() },
       {
-        onSuccess: () => onNext(),
+        onSuccess,
         onError: (error) => {
           if (isWorkspaceSlugConflict(error)) {
             setSlugServerError(WORKSPACE_SLUG_CONFLICT_ERROR);
@@ -65,59 +68,49 @@ export function StepWorkspace({ onNext }: { onNext: () => void }) {
   };
 
   return (
-    <div className="flex w-full max-w-md flex-col items-center gap-8">
-      <div className="text-center">
-        <h1 className="text-3xl font-semibold tracking-tight">
-          Welcome to Multica
-        </h1>
-        <p className="mt-2 text-muted-foreground">
-          Create your workspace to start building with AI agents.
-        </p>
-      </div>
-
-      <Card className="w-full">
-        <CardContent className="space-y-4 pt-6">
-          <div className="space-y-1.5">
-            <Label>Workspace Name</Label>
+    <Card className="w-full">
+      <CardContent className="space-y-4 pt-6">
+        <div className="space-y-1.5">
+          <Label htmlFor="ws-name">Workspace Name</Label>
+          <Input
+            id="ws-name"
+            autoFocus
+            type="text"
+            value={name}
+            onChange={(e) => handleNameChange(e.target.value)}
+            placeholder="My Workspace"
+            onKeyDown={(e) => e.key === "Enter" && handleCreate()}
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="ws-slug">Workspace URL</Label>
+          <div className="flex items-center gap-0 rounded-md border bg-background focus-within:ring-2 focus-within:ring-ring">
+            <span className="pl-3 text-sm text-muted-foreground select-none">
+              multica.ai/
+            </span>
             <Input
-              autoFocus
+              id="ws-slug"
               type="text"
-              value={name}
-              onChange={(e) => handleNameChange(e.target.value)}
-              placeholder="My Team"
+              value={slug}
+              onChange={(e) => handleSlugChange(e.target.value)}
+              placeholder="my-workspace"
+              className="border-0 shadow-none focus-visible:ring-0"
               onKeyDown={(e) => e.key === "Enter" && handleCreate()}
             />
           </div>
-          <div className="space-y-1.5">
-            <Label>Workspace URL</Label>
-            <div className="flex items-center gap-0 rounded-md border bg-background focus-within:ring-2 focus-within:ring-ring">
-              <span className="pl-3 text-sm text-muted-foreground select-none">
-                multica.ai/
-              </span>
-              <Input
-                type="text"
-                value={slug}
-                onChange={(e) => handleSlugChange(e.target.value)}
-                placeholder="my-team"
-                className="border-0 shadow-none focus-visible:ring-0"
-                onKeyDown={(e) => e.key === "Enter" && handleCreate()}
-              />
-            </div>
-            {slugError && (
-              <p className="text-xs text-destructive">{slugError}</p>
-            )}
-          </div>
-        </CardContent>
-      </Card>
-
-      <Button
-        className="w-full"
-        size="lg"
-        onClick={handleCreate}
-        disabled={createWorkspace.isPending || !canSubmit}
-      >
-        {createWorkspace.isPending ? "Creating..." : "Create Workspace"}
-      </Button>
-    </div>
+          {slugError && (
+            <p className="text-xs text-destructive">{slugError}</p>
+          )}
+        </div>
+        <Button
+          className="w-full"
+          size="lg"
+          onClick={handleCreate}
+          disabled={createWorkspace.isPending || !canSubmit}
+        >
+          {createWorkspace.isPending ? "Creating..." : "Create workspace"}
+        </Button>
+      </CardContent>
+    </Card>
   );
 }

@@ -5,6 +5,8 @@ import { WorkspaceSlugProvider, paths } from "@multica/core/paths";
 import { workspaceBySlugOptions } from "@multica/core/workspace";
 import { setCurrentWorkspace } from "@multica/core/platform";
 import { useAuthStore } from "@multica/core/auth";
+import { NoAccessPage } from "@multica/views/workspace/no-access-page";
+import { useWorkspaceSeen } from "@multica/views/workspace/use-workspace-seen";
 
 /**
  * Desktop equivalent of apps/web/app/[workspaceSlug]/layout.tsx.
@@ -16,15 +18,22 @@ import { useAuthStore } from "@multica/core/auth";
  * kept distinct: slug (URL / browser) and UUID (API / cache keys).
  *
  * If the slug doesn't resolve to any workspace the user has access to,
- * we redirect to `/` so IndexRedirect can pick the first valid workspace
- * (more forgiving than bouncing to onboarding, which is only right for
- * zero-workspace users).
+ * we render NoAccessPage instead of silently redirecting — users get
+ * explicit feedback for stale bookmarks or revoked access.
  */
 export function WorkspaceRouteLayout() {
   const { workspaceSlug } = useParams<{ workspaceSlug: string }>();
   const navigate = useNavigate();
   const user = useAuthStore((s) => s.user);
   const isAuthLoading = useAuthStore((s) => s.isLoading);
+
+  // Workspace routes require auth. If user is unauthenticated (token
+  // expired, logged out from another tab, etc.), bounce to /login.
+  // Without this, the layout renders null and the user sees a blank page
+  // stuck on /{slug}/...
+  useEffect(() => {
+    if (!isAuthLoading && !user) navigate(paths.login(), { replace: true });
+  }, [isAuthLoading, user, navigate]);
 
   const { data: workspace, isFetched: listFetched } = useQuery({
     ...workspaceBySlugOptions(workspaceSlug ?? ""),
@@ -40,24 +49,10 @@ export function WorkspaceRouteLayout() {
     setCurrentWorkspace(workspaceSlug, workspace.id);
   }
 
-  // Double-write legacy localStorage key for rollback compatibility — a
-  // pre-refactor build reads it to pick the initial workspace. Placed in
-  // an effect so repeated renders don't hammer localStorage.
-  useEffect(() => {
-    if (!workspace) return;
-    try {
-      localStorage.setItem("multica_workspace_id", workspace.id);
-    } catch {
-      // non-critical
-    }
-  }, [workspace]);
-
-  // Slug can't be resolved → bounce to `/` (IndexRedirect picks first
-  // valid workspace; falls to onboarding only if the list is truly empty).
-  useEffect(() => {
-    if (!user) return;
-    if (listFetched && !workspace) navigate(paths.root(), { replace: true });
-  }, [user, listFetched, workspace, navigate]);
+  // Remember whether this slug has resolved before (see hook docs). Gates
+  // the NoAccessPage render below so active workspace removal doesn't
+  // flash "Workspace not available" before the navigate lands.
+  const hasBeenSeen = useWorkspaceSeen(workspaceSlug, !!workspace);
 
   if (isAuthLoading) return null;
   if (!workspaceSlug) return null;
@@ -66,7 +61,15 @@ export function WorkspaceRouteLayout() {
   // unknown — gating here is the single point where that invariant is
   // enforced, so every descendant can call useWorkspaceId() safely.
   if (!listFetched) return null;
-  if (!workspace) return null;
+  if (!workspace) {
+    // Active workspace just removed (delete/leave/realtime eviction) —
+    // navigate is in flight; hold null briefly instead of flashing
+    // NoAccessPage.
+    if (hasBeenSeen) return null;
+    // Genuinely inaccessible slug (stale bookmark, revoked access, or a
+    // link from a former teammate's workspace) → explicit feedback.
+    return <NoAccessPage />;
+  }
 
   return (
     <WorkspaceSlugProvider slug={workspaceSlug}>

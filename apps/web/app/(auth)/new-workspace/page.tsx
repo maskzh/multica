@@ -1,17 +1,16 @@
 "use client";
 
-import { useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { useEffect } from "react";
 import { useAuthStore } from "@multica/core/auth";
 import { paths } from "@multica/core/paths";
-import { OnboardingWizard } from "@multica/views/onboarding";
+import { NewWorkspacePage } from "@multica/views/workspace/new-workspace-page";
 
-export default function OnboardingPage() {
+export default function Page() {
   const router = useRouter();
   const user = useAuthStore((s) => s.user);
   const isLoading = useAuthStore((s) => s.isLoading);
 
-  // Redirect to login if not authenticated
   useEffect(() => {
     if (!isLoading && !user) router.replace(paths.login());
   }, [isLoading, user, router]);
@@ -19,8 +18,8 @@ export default function OnboardingPage() {
   if (isLoading || !user) return null;
 
   return (
-    <OnboardingWizard
-      onComplete={(ws) => router.push(paths.workspace(ws.slug).issues())}
+    <NewWorkspacePage
+      onSuccess={(ws) => router.push(paths.workspace(ws.slug).issues())}
     />
   );
 }

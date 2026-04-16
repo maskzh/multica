@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { CoreProvider } from "@multica/core/platform";
 import { useAuthStore } from "@multica/core/auth";
-import { workspaceKeys } from "@multica/core/workspace/queries";
+import { workspaceKeys, workspaceListOptions } from "@multica/core/workspace/queries";
 import { api } from "@multica/core/api";
 import { ThemeProvider } from "@multica/ui/components/common/theme-provider";
 import { MulticaIcon } from "@multica/ui/components/common/multica-icon";
@@ -20,8 +20,8 @@ function AppContent() {
   // as soon as getMe resolves, which would cause DesktopShell to mount
   // before the workspace list is hydrated and briefly see `!workspace`.
   // This local flag keeps the loading screen up until the whole chain
-  // finishes, so the shell's "needs onboarding?" check gets a definitive
-  // workspace state on first render.
+  // finishes, so IndexRedirect gets a definitive workspace state on
+  // first render.
   const [bootstrapping, setBootstrapping] = useState(false);
 
   // Tell the main process which backend URL we talk to, so daemon-manager
@@ -68,6 +68,38 @@ function AppContent() {
       }
     })();
   }, [user]);
+
+  // When a user who started the session with zero workspaces creates their
+  // first one, restart the daemon so it picks up the new workspace
+  // immediately (otherwise workspaceSyncLoop's next 30s tick would be the
+  // earliest pickup point). Specifically scoped to "started empty" because
+  // account switches (user A logout → user B login) should not trigger a
+  // daemon restart here — daemon-manager already restarts on user change
+  // via syncToken.
+  const { data: workspaces, isFetched: workspaceListFetched } = useQuery({
+    ...workspaceListOptions(),
+    enabled: !!user,
+  });
+  const wsCount = workspaces?.length ?? 0;
+  // null = undecided (pre-login or list hasn't settled yet)
+  // true  = session started with zero workspaces; next transition to >=1 triggers restart
+  // false = session started with >=1 workspace, OR we've already restarted; skip
+  const sessionStartedEmptyRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (!user) {
+      sessionStartedEmptyRef.current = null;
+      return;
+    }
+    if (!workspaceListFetched) return;
+    if (sessionStartedEmptyRef.current === null) {
+      sessionStartedEmptyRef.current = wsCount === 0;
+      return;
+    }
+    if (sessionStartedEmptyRef.current && wsCount >= 1) {
+      void window.daemonAPI.restart();
+      sessionStartedEmptyRef.current = false;
+    }
+  }, [user, workspaceListFetched, wsCount]);
 
   if (isLoading || bootstrapping) {
     return (

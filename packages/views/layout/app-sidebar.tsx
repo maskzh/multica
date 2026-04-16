@@ -273,7 +273,7 @@ export function AppSidebar({ topSlot, searchSlot, headerClassName, headerStyle }
     }
     // Clear the last-workspace-slug cookie. Otherwise on a shared device the
     // next user gets redirected by the proxy to the previous user's last
-    // workspace (then bounced to /onboarding by the layout — flash + confusing).
+    // workspace (then bounced to NoAccessPage by the layout — confusing).
     if (typeof document !== "undefined") {
       document.cookie = "last_workspace_slug=; path=/; max-age=0; SameSite=Lax";
     }
@@ -283,6 +283,11 @@ export function AppSidebar({ topSlot, searchSlot, headerClassName, headerStyle }
     defaultStorage.removeItem("multica_tabs");
     queryClient.clear();
     authLogout();
+    // Navigate to /login explicitly. authLogout() clears state but doesn't
+    // move the URL, and the current URL is a workspace-scoped path that
+    // means nothing without auth — without this redirect the user stays on
+    // /{slug}/... and the layout renders null (blank screen).
+    push(paths.login());
   };
 
   // Global "C" shortcut to open create-issue modal (like Linear)

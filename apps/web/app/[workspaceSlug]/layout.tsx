@@ -7,6 +7,8 @@ import { WorkspaceSlugProvider, paths } from "@multica/core/paths";
 import { workspaceBySlugOptions } from "@multica/core/workspace";
 import { setCurrentWorkspace } from "@multica/core/platform";
 import { useAuthStore } from "@multica/core/auth";
+import { NoAccessPage } from "@multica/views/workspace/no-access-page";
+import { useWorkspaceSeen } from "@multica/views/workspace/use-workspace-seen";
 
 export default function WorkspaceLayout({
   children,
@@ -19,6 +21,14 @@ export default function WorkspaceLayout({
   const user = useAuthStore((s) => s.user);
   const isAuthLoading = useAuthStore((s) => s.isLoading);
   const router = useRouter();
+
+  // Workspace routes require auth. If user is unauthenticated (initial visit
+  // without a session, token expired, another tab logged out, etc.), bounce
+  // to /login. Without this, the layout renders null and the user sees a
+  // blank page stuck on /{slug}/...
+  useEffect(() => {
+    if (!isAuthLoading && !user) router.replace(paths.login());
+  }, [isAuthLoading, user, router]);
 
   // Resolve workspace by slug from the React Query list cache.
   // Enabled only when user is authenticated — otherwise the list query isn't seeded.
@@ -35,39 +45,36 @@ export default function WorkspaceLayout({
     setCurrentWorkspace(workspaceSlug, workspace.id);
   }
 
-  // Cookie write (last_workspace_slug) — proxy reads it on next page load.
-  // ALSO write legacy localStorage["multica_workspace_id"] for forward/back
-  // compatibility: if this version ever gets reverted to the pre-refactor
-  // build, the legacy code reads that localStorage key to know which
-  // workspace to attach to API requests. Without double-writing, a rollback
-  // would leave returning users with empty data (API calls would have no
-  // X-Workspace-ID header). Forward compatible — new code ignores this key.
+  // Cookie write (last_workspace_slug) — proxy reads it on next page load
+  // to redirect unauthenticated-URL hits to the user's last workspace.
   useEffect(() => {
     if (!workspace || typeof document === "undefined") return;
     const oneYear = 60 * 60 * 24 * 365;
     const secure = location.protocol === "https:" ? "; Secure" : "";
     document.cookie = `last_workspace_slug=${encodeURIComponent(workspaceSlug)}; path=/; max-age=${oneYear}; SameSite=Lax${secure}`;
-    try {
-      localStorage.setItem("multica_workspace_id", workspace.id);
-    } catch {
-      // localStorage may be unavailable in restricted contexts; non-critical.
-    }
   }, [workspace, workspaceSlug]);
 
-  // Slug doesn't match any workspace the user has access to → bounce to `/`
-  // and let the root IndexRedirect pick the first valid workspace (falls to
-  // onboarding only when the list is truly empty).
-  useEffect(() => {
-    if (!user) return;
-    if (listFetched && !workspace) router.replace(paths.root());
-  }, [user, listFetched, workspace, router]);
+  // Remember whether this slug has resolved before. Used below to avoid
+  // flashing NoAccessPage during active workspace removal (delete, leave,
+  // or realtime eviction) — in those cases the caller is navigating away
+  // and we just need to hold null briefly.
+  const hasBeenSeen = useWorkspaceSeen(workspaceSlug, !!workspace);
 
   if (isAuthLoading) return null;
   // Don't render children until workspace is resolved. useWorkspaceId()
   // throws when the list hasn't populated or the slug is unknown — gating
   // here makes that invariant hold for every descendant.
   if (!listFetched) return null;
-  if (!workspace) return null;
+  if (!workspace) {
+    // If we've resolved this slug before in this session, it was just
+    // removed from our list (deleted/left/evicted). A navigate is almost
+    // certainly in flight — render null to avoid a NoAccessPage flash.
+    if (hasBeenSeen) return null;
+    // Otherwise: the URL points at a workspace the user never had access
+    // to. Show explicit feedback instead of silently redirecting. Doesn't
+    // distinguish 404 vs 403 to avoid letting attackers enumerate slugs.
+    return <NoAccessPage />;
+  }
 
   return (
     <WorkspaceSlugProvider slug={workspaceSlug}>
