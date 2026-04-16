@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"html"
 	"os"
 	"strings"
 
@@ -68,6 +69,9 @@ func (s *EmailService) SendInvitationEmail(to, inviterName, workspaceName, invit
 		return nil
 	}
 
+	safeWorkspace := html.EscapeString(workspaceName)
+	safeInviter := html.EscapeString(inviterName)
+
 	params := &resend.SendEmailRequest{
 		From:    s.fromEmail,
 		To:      []string{to},
@@ -80,7 +84,7 @@ func (s *EmailService) SendInvitationEmail(to, inviterName, workspaceName, invit
 					<a href="%s" style="display: inline-block; padding: 12px 24px; background: #000; color: #fff; text-decoration: none; border-radius: 6px; font-weight: 500;">Accept invitation</a>
 				</p>
 				<p style="color: #666; font-size: 14px;">You'll need to log in to accept or decline the invitation.</p>
-			</div>`, workspaceName, inviterName, workspaceName, inviteURL),
+			</div>`, safeWorkspace, safeInviter, safeWorkspace, inviteURL),
 	}
 
 	_, err := s.client.Emails.Send(params)
