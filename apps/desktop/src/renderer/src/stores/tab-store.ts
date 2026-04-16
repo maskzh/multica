@@ -3,7 +3,7 @@ import { createJSONStorage, persist } from "zustand/middleware";
 import { arrayMove } from "@dnd-kit/sortable";
 import { createPersistStorage, defaultStorage } from "@multica/core/platform";
 import { createSafeId } from "@multica/core/utils";
-import { isGlobalPath } from "@multica/core/paths";
+import { isGlobalPath, isReservedSlug } from "@multica/core/paths";
 import type { DataRouter } from "react-router-dom";
 import { createTabRouter } from "../routes";
 
@@ -104,13 +104,44 @@ function createId(): string {
   return createSafeId();
 }
 
+/**
+ * Defensive: catch tab paths that were constructed without a workspace slug
+ * (e.g. a hardcoded "/issues" leftover from before the URL refactor). Such
+ * paths would get matched as `workspaceSlug="issues"` by the router and
+ * render NoAccessPage. Sanitize by falling back to "/" (IndexRedirect picks
+ * a valid workspace).
+ *
+ * Passes through:
+ *  - "/" and global paths (/login, /workspaces/new, /invite/..., /auth/...)
+ *  - workspace-scoped paths whose first segment is not a reserved word
+ *
+ * Rejects (and rewrites to "/"):
+ *  - Paths whose first segment is a reserved slug (=/=workspace slug), which
+ *    means the caller forgot to prefix the workspace. Logs a warning so the
+ *    buggy call site is easy to find.
+ */
+export function sanitizeTabPath(path: string): string {
+  if (path === DEFAULT_PATH || isGlobalPath(path)) return path;
+  const firstSegment = path.split("/").filter(Boolean)[0] ?? "";
+  if (isReservedSlug(firstSegment)) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[tab-store] tab path "${path}" starts with reserved slug "${firstSegment}" — ` +
+        `caller likely forgot the workspace prefix. Falling back to "/".`,
+    );
+    return DEFAULT_PATH;
+  }
+  return path;
+}
+
 function makeTab(path: string, title: string, icon: string): Tab {
+  const safePath = sanitizeTabPath(path);
   return {
     id: createId(),
-    path,
+    path: safePath,
     title,
     icon,
-    router: createTabRouter(path),
+    router: createTabRouter(safePath),
     historyIndex: 0,
     historyLength: 1,
   };
@@ -239,19 +270,13 @@ export const useTabStore = create<TabStore>()(
         if (!persisted?.tabs?.length) return currentState;
 
         const tabs: Tab[] = persisted.tabs.map((tab) => {
-          // Migration: pre-refactor tab paths like "/issues/abc" lack a
-          // workspace slug prefix. These would 404 in the new router.
-          // Reset to "/" so IndexRedirect picks the right workspace.
-          let path = tab.path;
-          if (path !== "/" && !isGlobalPath(path)) {
-            const segments = path.split("/").filter(Boolean);
-            const firstSegment = segments[0] ?? "";
-            // If the first segment IS a known route name (e.g. "issues",
-            // "projects"), it's an old-format path missing the slug prefix.
-            if (ROUTE_ICONS[firstSegment]) {
-              path = "/";
-            }
-          }
+          // Sanitize persisted paths against reserved-slug rules. Catches
+          // both pre-refactor paths like "/issues/abc" (missing workspace
+          // slug) and any other malformed paths that slipped past the
+          // write-time guard. The defense across makeTab + merge + runtime
+          // validate ensures stale or malformed paths never reach the
+          // router.
+          const path = sanitizeTabPath(tab.path);
           return {
             ...tab,
             path,

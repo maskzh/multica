@@ -30,6 +30,7 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { cn } from "@multica/ui/lib/utils";
 import { useTabStore, resolveRouteIcon, type Tab } from "@/stores/tab-store";
+import { isGlobalPath, paths } from "@multica/core/paths";
 
 const TAB_ICONS: Record<string, LucideIcon> = {
   Inbox,
@@ -124,10 +125,22 @@ function NewTabButton() {
   const setActiveTab = useTabStore((s) => s.setActiveTab);
 
   const handleClick = () => {
-    const path = "/issues";
+    // Inherit the active tab's workspace. Terminal/IDE convention: new tab
+    // opens in the same context as the active one. Read the slug from the
+    // active tab's path directly rather than from getCurrentSlug(), because
+    // that singleton is "last tab to render" (non-deterministic with N tabs
+    // mounted under <Activity>), while activeTabId is the unambiguous truth.
+    // Falls back to "/" (→ IndexRedirect → first workspace) when the active
+    // tab is on a global route (e.g. /workspaces/new, /login).
+    const { tabs, activeTabId } = useTabStore.getState();
+    const activePath = tabs.find((t) => t.id === activeTabId)?.path ?? "/";
+    let slug: string | null = null;
+    if (activePath !== "/" && !isGlobalPath(activePath)) {
+      slug = activePath.split("/").filter(Boolean)[0] ?? null;
+    }
+    const path = slug ? paths.workspace(slug).issues() : "/";
     const tabId = addTab(path, "Issues", resolveRouteIcon(path));
     setActiveTab(tabId);
-    // No navigate() — new tab's router starts at /issues automatically
   };
 
   return (
