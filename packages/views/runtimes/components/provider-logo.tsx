@@ -73,6 +73,26 @@ function HermesLogo({ className }: { className: string }) {
   );
 }
 
+// Pi — Greek letter π mark, styled in Pi brand teal
+function PiLogo({ className }: { className: string }) {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" className={className}>
+      <rect width="16" height="16" rx="3" fill="#0D9488" />
+      <text
+        x="8"
+        y="12.5"
+        textAnchor="middle"
+        fontFamily="serif"
+        fontSize="12"
+        fontWeight="bold"
+        fill="white"
+      >
+        π
+      </text>
+    </svg>
+  );
+}
+
 export function ProviderLogo({
   provider,
   className = "h-4 w-4",
@@ -91,6 +111,8 @@ export function ProviderLogo({
       return <OpenClawLogo className={className} />;
     case "hermes":
       return <HermesLogo className={className} />;
+    case "pi":
+      return <PiLogo className={className} />;
     default:
       return <Monitor className={className} />;
   }

@@ -27,7 +27,8 @@ func NewScanner(logger *slog.Logger) *Scanner {
 
 // Scan reads local log files for all supported agent runtimes (Claude Code,
 // Codex, OpenCode, OpenClaw, Hermes) and returns aggregated usage records
-// keyed by (date, provider, model).
+// keyed by (date, provider, model). Supports Claude Code, Codex, OpenCode,
+// OpenClaw, Hermes, and Pi.
 func (s *Scanner) Scan() []Record {
 	var records []Record
 
@@ -45,6 +46,9 @@ func (s *Scanner) Scan() []Record {
 
 	hermesRecords := s.scanHermes()
 	records = append(records, hermesRecords...)
+
+	piRecords := s.scanPi()
+	records = append(records, piRecords...)
 
 	return records
 }
