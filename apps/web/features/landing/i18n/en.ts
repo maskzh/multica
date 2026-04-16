@@ -14,6 +14,7 @@ export const en: LandingDict = {
     subheading:
       "Multica is an open-source platform that turns coding agents into real teammates. Assign tasks, track progress, compound skills \u2014 manage your human + agent workforce in one place.",
     cta: "Start free trial",
+    downloadDesktop: "Download Desktop",
     worksWith: "Works with",
     imageAlt: "Multica board view \u2014 issues managed by humans and agents",
   },
@@ -223,6 +224,7 @@ export const en: LandingDict = {
           { label: "Features", href: "#features" },
           { label: "How it Works", href: "#how-it-works" },
           { label: "Changelog", href: "/changelog" },
+          { label: "Desktop", href: "https://github.com/multica-ai/multica/releases/latest" },
         ],
       },
       resources: {

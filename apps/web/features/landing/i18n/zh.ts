@@ -13,8 +13,9 @@ export const zh: LandingDict = {
     headlineLine2: "\u4e0d\u662f\u4eba\u7c7b\u3002",
     subheading:
       "Multica \u662f\u4e00\u4e2a\u5f00\u6e90\u5e73\u53f0\uff0c\u5c06\u7f16\u7801 Agent \u53d8\u6210\u771f\u6b63\u7684\u961f\u53cb\u3002\u5206\u914d\u4efb\u52a1\u3001\u8ddf\u8e2a\u8fdb\u5ea6\u3001\u79ef\u7d2f\u6280\u80fd\u2014\u2014\u5728\u4e00\u4e2a\u5730\u65b9\u7ba1\u7406\u4f60\u7684\u4eba\u7c7b + Agent \u56e2\u961f\u3002",
-    cta: "\u514d\u8d39\u5f00\u59cb",
-    worksWith: "\u652f\u6301",
+    cta: "免费开始",
+    downloadDesktop: "下载桌面端",
+    worksWith: "支持",
     imageAlt: "Multica \u770b\u677f\u89c6\u56fe\u2014\u2014\u4eba\u7c7b\u548c Agent \u534f\u540c\u7ba1\u7406\u4efb\u52a1",
   },
 
@@ -222,7 +223,8 @@ export const zh: LandingDict = {
         links: [
           { label: "\u529f\u80fd\u7279\u6027", href: "#features" },
           { label: "\u5982\u4f55\u5de5\u4f5c", href: "#how-it-works" },
-          { label: "\u66f4\u65b0\u65e5\u5fd7", href: "/changelog" },
+          { label: "更新日志", href: "/changelog" },
+          { label: "桌面端", href: "https://github.com/multica-ai/multica/releases/latest" },
         ],
       },
       resources: {
