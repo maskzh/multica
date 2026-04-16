@@ -24,6 +24,7 @@ interface Env {
   S3_BUCKET: string;
   S3_REGION: string;
   AWS_ENDPOINT_URL: string;
+  CLOUDFRONT_DOMAIN: string;
 }
 
 const BACKEND_PREFIXES = ["/api/", "/auth/", "/health"];
@@ -54,6 +55,7 @@ export default {
           S3_BUCKET: env.S3_BUCKET,
           S3_REGION: env.S3_REGION,
           AWS_ENDPOINT_URL: env.AWS_ENDPOINT_URL,
+          CLOUDFRONT_DOMAIN: env.CLOUDFRONT_DOMAIN,
           AWS_ACCESS_KEY_ID: env.AWS_ACCESS_KEY_ID,
           AWS_SECRET_ACCESS_KEY: env.AWS_SECRET_ACCESS_KEY,
         },

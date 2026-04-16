@@ -9,7 +9,8 @@
     "GOOGLE_REDIRECT_URI": "https://multica.maskzh.com/auth/callback",
     "S3_BUCKET": "multica",
     "S3_REGION": "auto",
-    "AWS_ENDPOINT_URL": "https://3f3c39381b33e26c98f39ec06d53b0d1.r2.cloudflarestorage.com"
+    "AWS_ENDPOINT_URL": "https://3f3c39381b33e26c98f39ec06d53b0d1.r2.cloudflarestorage.com",
+    "CLOUDFRONT_DOMAIN": "pub-f7b49defa74c47c38880a0746ca55828.r2.dev"
   },
   "services": [{ "binding": "FRONTEND_WORKER", "service": "multica-web" }],
   "durable_objects": {

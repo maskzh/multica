@@ -158,14 +158,11 @@ func (s *S3Storage) Upload(ctx context.Context, key string, data []byte, content
 		return "", fmt.Errorf("s3 PutObject: %w", err)
 	}
 
-	if s.endpointURL != "" {
-		link := fmt.Sprintf("%s/%s/%s", strings.TrimRight(s.endpointURL, "/"), s.bucket, key)
-		return link, nil
-	}
-	domain := s.bucket
 	if s.cdnDomain != "" {
-		domain = s.cdnDomain
+		return fmt.Sprintf("https://%s/%s", s.cdnDomain, key), nil
 	}
-	link := fmt.Sprintf("https://%s/%s", domain, key)
-	return link, nil
+	if s.endpointURL != "" {
+		return fmt.Sprintf("%s/%s/%s", strings.TrimRight(s.endpointURL, "/"), s.bucket, key), nil
+	}
+	return fmt.Sprintf("https://%s/%s", s.bucket, key), nil
 }
