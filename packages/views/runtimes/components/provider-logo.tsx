@@ -73,22 +73,17 @@ function HermesLogo({ className }: { className: string }) {
   );
 }
 
-// Pi — Greek letter π mark, styled in Pi brand teal
+// Pi (pi.dev) — official pixel-art "pi" wordmark, sourced from pi.dev/logo.svg
 function PiLogo({ className }: { className: string }) {
   return (
-    <svg viewBox="0 0 16 16" fill="none" className={className}>
-      <rect width="16" height="16" rx="3" fill="#0D9488" />
-      <text
-        x="8"
-        y="12.5"
-        textAnchor="middle"
-        fontFamily="serif"
-        fontSize="12"
-        fontWeight="bold"
-        fill="white"
-      >
-        π
-      </text>
+    <svg viewBox="0 0 800 800" fill="none" className={className}>
+      <rect width="800" height="800" rx="150" fill="#09090b" />
+      <path
+        fill="#fff"
+        fillRule="evenodd"
+        d="M165.29 165.29H517.36V400H400V517.36H282.65V634.72H165.29ZM282.65 282.65V400H400V282.65Z"
+      />
+      <path fill="#fff" d="M517.36 400H634.72V634.72H517.36Z" />
     </svg>
   );
 }
