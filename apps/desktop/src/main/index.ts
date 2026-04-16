@@ -94,6 +94,18 @@ function createWindow(): void {
   }
 }
 
+// --- Dev / production isolation -------------------------------------------
+// Give dev mode a separate app name and userData path so it gets its own
+// single-instance lock file and doesn't conflict with the packaged production
+// app. Must run BEFORE requestSingleInstanceLock() because the lock location
+// is derived from the userData path. (Same approach VS Code uses for
+// Stable / Insiders coexistence.)
+
+if (is.dev) {
+  app.setName("Multica Dev");
+  app.setPath("userData", join(app.getPath("appData"), "Multica Dev"));
+}
+
 // --- Protocol registration -----------------------------------------------
 
 if (process.defaultApp) {
@@ -125,7 +137,9 @@ if (!gotTheLock) {
   });
 
   app.whenReady().then(() => {
-    electronApp.setAppUserModelId("ai.multica.desktop");
+    electronApp.setAppUserModelId(
+      is.dev ? "ai.multica.desktop.dev" : "ai.multica.desktop",
+    );
 
     app.on("browser-window-created", (_, window) => {
       optimizer.watchWindowShortcuts(window);
