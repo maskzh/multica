@@ -16,12 +16,6 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["BackendContainer"]
-    },
-    {
-      "tag": "v2"
-    },
-    {
-      "tag": "v3"
     }
   ],
   "containers": [
@@ -33,5 +27,11 @@
   ],
   "placement": {
     "region": "gcp:asia-east1"
+  },
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true
+    }
   }
 }

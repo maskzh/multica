@@ -9,5 +9,11 @@
   },
   "placement": {
     "region": "gcp:asia-east1"
+  },
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true
+    }
   }
 }
