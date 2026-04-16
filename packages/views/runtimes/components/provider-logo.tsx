@@ -88,6 +88,16 @@ function PiLogo({ className }: { className: string }) {
   );
 }
 
+// GitHub Copilot — official mark, sourced from GitHub brand assets
+function CopilotLogo({ className }: { className: string }) {
+  return (
+    <svg viewBox="0 0 16 16" fill="currentColor" className={className}>
+      <path d="M7.998 15.035c-4.562 0-7.873-2.914-7.998-3.749V9.338c.085-.628.677-1.279 1.588-1.88a21 21 0 0 1 2.585-1.382C4.646 4.07 5.892 2.476 7.998 2.476c2.106 0 3.352 1.594 3.825 3.6a21 21 0 0 1 2.585 1.381c.911.602 1.503 1.253 1.588 1.881v1.948c-.125.835-3.436 3.749-7.998 3.749m-.002-1.5c2.724 0 5.32-1.556 6.477-2.564.2-.175.27-.396.27-.541V9.358a2.6 2.6 0 0 0-.761-.959c-.373-.287-.87-.593-1.465-.885a4.4 4.4 0 0 1-.198 1.299 1.592 1.592 0 0 1-.738-.648c.062-.27.1-.57.1-.904 0-1.664-.645-3.285-3.685-3.285s-3.685 1.621-3.685 3.285c0 .334.038.635.1.904a1.592 1.592 0 0 1-.738.648 4.4 4.4 0 0 1-.198-1.299 13 13 0 0 0-1.465.885 2.6 2.6 0 0 0-.76.96v1.071c0 .145.069.366.27.541 1.156 1.008 3.752 2.564 6.476 2.564" />
+      <path d="M6.27 8.5c0 .701-.504 1.27-1.126 1.27S4.018 9.201 4.018 8.5s.504-1.27 1.126-1.27S6.27 7.799 6.27 8.5m5.726 0c0 .701-.504 1.27-1.126 1.27S9.744 9.201 9.744 8.5s.504-1.27 1.126-1.27 1.126.569 1.126 1.27" />
+    </svg>
+  );
+}
+
 // Cursor — official brand logo from Cursor brand assets
 function CursorLogo({ className }: { className: string }) {
   return (
@@ -122,6 +132,8 @@ export function ProviderLogo({
       return <HermesLogo className={className} />;
     case "pi":
       return <PiLogo className={className} />;
+    case "copilot":
+      return <CopilotLogo className={className} />;
     case "cursor":
       return <CursorLogo className={className} />;
     default:
