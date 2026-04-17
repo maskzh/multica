@@ -12,8 +12,8 @@ export class BackendContainer extends Container {
 interface Env {
   BACKEND: DurableObjectNamespace<BackendContainer>;
   FRONTEND_WORKER: Fetcher;
+  HYPERDRIVE: Hyperdrive;
   // Worker secrets — set via: wrangler secret put <NAME>
-  DATABASE_URL: string;
   JWT_SECRET: string;
   AWS_ACCESS_KEY_ID: string;
   AWS_SECRET_ACCESS_KEY: string;
@@ -48,7 +48,7 @@ export default {
         envVars: {
           PORT: "8080",
           LOG_LEVEL: "info",
-          DATABASE_URL: env.DATABASE_URL,
+          DATABASE_URL: env.HYPERDRIVE.connectionString,
           JWT_SECRET: env.JWT_SECRET,
           FRONTEND_ORIGIN: env.FRONTEND_ORIGIN,
           CORS_ALLOWED_ORIGINS: env.CORS_ALLOWED_ORIGINS,

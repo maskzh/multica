@@ -37,5 +37,11 @@
       "enabled": true,
       "invocation_logs": true
     }
-  }
+  },
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "0e931a474e924b11abd60b67e36bd002"
+    }
+  ]
 }
