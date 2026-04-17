@@ -4,7 +4,7 @@ import { Container, getContainer } from "@cloudflare/containers";
 // manualStart = true so we can inject secrets via start({ envVars })
 export class BackendContainer extends Container {
   defaultPort = 8080;
-  sleepAfter = "5m";
+  sleepAfter = "1m";
   manualStart = true;
   enableInternet = true;
 }
