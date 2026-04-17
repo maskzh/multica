@@ -18,6 +18,7 @@ interface Env {
   AWS_ACCESS_KEY_ID: string;
   AWS_SECRET_ACCESS_KEY: string;
   // Worker vars (non-sensitive)
+  APP_ENV: string;
   FRONTEND_ORIGIN: string;
   CORS_ALLOWED_ORIGINS: string;
   GOOGLE_REDIRECT_URI: string;
@@ -48,6 +49,7 @@ export default {
         envVars: {
           PORT: "8080",
           LOG_LEVEL: "info",
+          APP_ENV: env.APP_ENV,
           DATABASE_URL: env.DATABASE_URL,
           JWT_SECRET: env.JWT_SECRET,
           FRONTEND_ORIGIN: env.FRONTEND_ORIGIN,
