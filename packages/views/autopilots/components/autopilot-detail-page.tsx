@@ -52,9 +52,9 @@ function formatDate(date: string): string {
   });
 }
 
-const RUN_STATUS_CONFIG: Record<string, { label: string; color: string; icon: typeof CheckCircle2 }> = {
+const RUN_STATUS_CONFIG: Record<string, { label: string; color: string; icon: typeof CheckCircle2; spin?: boolean }> = {
   issue_created: { label: "Issue Created", color: "text-blue-500", icon: Clock },
-  running: { label: "Running", color: "text-blue-500", icon: Loader2 },
+  running: { label: "Running", color: "text-blue-500", icon: Loader2, spin: true },
   completed: { label: "Completed", color: "text-emerald-500", icon: CheckCircle2 },
   failed: { label: "Failed", color: "text-destructive", icon: XCircle },
 };
@@ -66,7 +66,7 @@ function RunRow({ run }: { run: AutopilotRun }) {
 
   const content = (
     <>
-      <StatusIcon className={cn("h-4 w-4 shrink-0", cfg.color)} />
+      <StatusIcon className={cn("h-4 w-4 shrink-0", cfg.color, cfg.spin && "animate-spin")} />
       <span className={cn("w-24 shrink-0 text-xs font-medium", cfg.color)}>{cfg.label}</span>
       <span className="w-16 shrink-0 text-xs text-muted-foreground capitalize">{run.source}</span>
       <span className="flex-1 min-w-0 text-xs text-muted-foreground truncate">
@@ -385,9 +385,39 @@ export function AutopilotDetailPage({ autopilotId }: { autopilotId: string }) {
 
   if (isLoading) {
     return (
-      <div className="p-6 space-y-4">
-        <Skeleton className="h-8 w-64" />
-        <Skeleton className="h-40 w-full" />
+      <div className="flex h-full flex-col">
+        <div className="flex h-12 shrink-0 items-center gap-2 border-b px-5">
+          <Skeleton className="h-4 w-4" />
+          <span className="text-muted-foreground">/</span>
+          <Skeleton className="h-4 w-32" />
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          <div className="max-w-4xl mx-auto p-6 space-y-8">
+            <section className="space-y-4">
+              <Skeleton className="h-3 w-20" />
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-1">
+                  <Skeleton className="h-3 w-12" />
+                  <Skeleton className="h-5 w-32" />
+                </div>
+                <div className="space-y-1">
+                  <Skeleton className="h-3 w-12" />
+                  <Skeleton className="h-5 w-24" />
+                </div>
+              </div>
+            </section>
+            <section className="space-y-3">
+              <Skeleton className="h-4 w-16" />
+              <Skeleton className="h-10 w-full rounded-md" />
+            </section>
+            <section className="space-y-3">
+              <Skeleton className="h-4 w-24" />
+              {Array.from({ length: 3 }).map((_, i) => (
+                <Skeleton key={i} className="h-10 w-full" />
+              ))}
+            </section>
+          </div>
+        </div>
       </div>
     );
   }
