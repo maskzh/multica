@@ -144,6 +144,7 @@ export function createZhDict(allowSignup: boolean): LandingDict {
     ],
     cta: "\u5f00\u59cb\u4f7f\u7528",
     ctaGithub: "\u5728 GitHub \u4e0a\u67e5\u770b",
+    ctaDocs: "\u9605\u8bfb\u6587\u6863",
   },
 
   openSource: {
@@ -232,7 +233,7 @@ export function createZhDict(allowSignup: boolean): LandingDict {
       resources: {
         label: "\u8d44\u6e90",
         links: [
-          { label: "\u6587\u6863", href: githubUrl },
+          { label: "\u6587\u6863", href: "/docs/zh" },
           { label: "API", href: githubUrl },
           { label: "X (Twitter)", href: "https://x.com/MulticaAI" },
         ],
@@ -275,6 +276,7 @@ export function createZhDict(allowSignup: boolean): LandingDict {
   changelog: {
     title: "\u66f4\u65b0\u65e5\u5fd7",
     subtitle: "Multica \u7684\u6700\u65b0\u66f4\u65b0\u548c\u6539\u8fdb\u3002",
+    toc: "\u5386\u53f2\u7248\u672c",
     categories: {
       features: "新功能",
       improvements: "改进",

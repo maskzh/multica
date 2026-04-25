@@ -144,6 +144,7 @@ export function createEnDict(allowSignup: boolean): LandingDict {
     ],
     cta: "Get started",
     ctaGithub: "View on GitHub",
+    ctaDocs: "Read the docs",
   },
 
   openSource: {
@@ -232,7 +233,7 @@ export function createEnDict(allowSignup: boolean): LandingDict {
       resources: {
         label: "Resources",
         links: [
-          { label: "Documentation", href: githubUrl },
+          { label: "Documentation", href: "/docs" },
           { label: "API", href: githubUrl },
           { label: "X (Twitter)", href: "https://x.com/MulticaAI" },
         ],
@@ -275,6 +276,7 @@ export function createEnDict(allowSignup: boolean): LandingDict {
   changelog: {
     title: "Changelog",
     subtitle: "New updates and improvements to Multica.",
+    toc: "All releases",
     categories: {
       features: "New Features",
       improvements: "Improvements",

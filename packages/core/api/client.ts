@@ -33,7 +33,6 @@ import type {
   RuntimeUsage,
   IssueUsageSummary,
   RuntimeHourlyActivity,
-  RuntimePing,
   RuntimeUpdate,
   RuntimeModelListRequest,
   RuntimeLocalSkillListRequest,
@@ -395,6 +394,17 @@ export class ApiClient {
     });
   }
 
+  async createFeedback(data: {
+    message: string;
+    url?: string;
+    workspace_id?: string;
+  }): Promise<{ id: string; created_at: string }> {
+    return this.fetch("/api/feedback", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
   async updateIssue(id: string, data: UpdateIssueRequest): Promise<Issue> {
     return this.fetch(`/api/issues/${id}`, {
       method: "PUT",
@@ -570,14 +580,6 @@ export class ApiClient {
 
   async getRuntimeTaskActivity(runtimeId: string): Promise<RuntimeHourlyActivity[]> {
     return this.fetch(`/api/runtimes/${runtimeId}/activity`);
-  }
-
-  async pingRuntime(runtimeId: string): Promise<RuntimePing> {
-    return this.fetch(`/api/runtimes/${runtimeId}/ping`, { method: "POST" });
-  }
-
-  async getPingResult(runtimeId: string, pingId: string): Promise<RuntimePing> {
-    return this.fetch(`/api/runtimes/${runtimeId}/ping/${pingId}`);
   }
 
   async initiateUpdate(
