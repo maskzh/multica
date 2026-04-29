@@ -7,13 +7,14 @@ import { api } from "@multica/core/api";
 import { useHasOnboarded } from "@multica/core/paths";
 import { ThemeProvider } from "@multica/ui/components/common/theme-provider";
 import { MulticaIcon } from "@multica/ui/components/common/multica-icon";
-import { Toaster } from "sonner";
+import { Toaster } from "@multica/ui/components/ui/sonner";
 import { DesktopLoginPage } from "./pages/login";
 import { DesktopShell } from "./components/desktop-layout";
 import { PageviewTracker } from "./components/pageview-tracker";
 import { UpdateNotification } from "./components/update-notification";
 import { useTabStore } from "./stores/tab-store";
 import { useWindowOverlayStore } from "./stores/window-overlay-store";
+import { useDaemonIPCBridge } from "./platform/daemon-ipc-bridge";
 
 
 function AppContent() {
@@ -98,6 +99,16 @@ function AppContent() {
   });
   const wsCount = workspaces.length;
   const hasOnboarded = useHasOnboarded();
+
+  // Bridge local daemon IPC status into the runtimes cache so this user's
+  // own daemon flips to offline/online sub-second instead of waiting on the
+  // server's 75s sweeper. Resolves wsId from the active tab so workspace
+  // switches automatically rebind the subscription.
+  const activeWorkspaceSlug = useTabStore((s) => s.activeWorkspaceSlug);
+  const activeWsId = activeWorkspaceSlug
+    ? workspaces.find((w) => w.slug === activeWorkspaceSlug)?.id
+    : undefined;
+  useDaemonIPCBridge(activeWsId);
 
   // Onboarding and zero-workspace both resolve to an overlay, but
   // onboarding wins: a user who hasn't completed it gets the onboarding

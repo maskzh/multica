@@ -45,9 +45,13 @@ type Daemon struct {
 	workspaces   map[string]*workspaceState
 	runtimeIndex map[string]Runtime // runtimeID -> Runtime for provider lookups
 	reloading    sync.Mutex         // prevents concurrent workspace syncs
+	runtimeSetCh chan struct{}      // notifies the WS wakeup loop to reconnect with a new runtime set
 
 	versionsMu    sync.RWMutex      // guards agentVersions
 	agentVersions map[string]string // provider -> detected CLI version (set during registration)
+
+	wsHBMu      sync.RWMutex         // guards wsHBLastAck
+	wsHBLastAck map[string]time.Time // runtime_id -> last successful WS heartbeat ack timestamp
 
 	cancelFunc    context.CancelFunc // set by Run(); called by triggerRestart
 	restartBinary string             // non-empty after a successful update; path to the new binary
@@ -69,7 +73,9 @@ func New(cfg Config, logger *slog.Logger) *Daemon {
 		logger:        logger,
 		workspaces:    make(map[string]*workspaceState),
 		runtimeIndex:  make(map[string]Runtime),
+		runtimeSetCh:  make(chan struct{}, 1),
 		agentVersions: make(map[string]string),
+		wsHBLastAck:   make(map[string]time.Time),
 	}
 }
 
@@ -87,6 +93,69 @@ func (d *Daemon) agentVersion(provider string) string {
 	d.versionsMu.RLock()
 	defer d.versionsMu.RUnlock()
 	return d.agentVersions[provider]
+}
+
+func (d *Daemon) notifyRuntimeSetChanged() {
+	select {
+	case d.runtimeSetCh <- struct{}{}:
+	default:
+	}
+}
+
+func (d *Daemon) drainRuntimeSetChanged() {
+	for {
+		select {
+		case <-d.runtimeSetCh:
+		default:
+			return
+		}
+	}
+}
+
+// wsHeartbeatFreshness defines how long a WS heartbeat ack is considered
+// "fresh enough" to suppress the HTTP heartbeat for that runtime. The window
+// is 2× HeartbeatInterval so a single dropped WS ack still keeps HTTP
+// suppressed, but two missed acks (~30s of WS silence) re-enable HTTP — well
+// inside the server-side 45s offline threshold.
+func (d *Daemon) wsHeartbeatFreshness() time.Duration {
+	if d.cfg.HeartbeatInterval <= 0 {
+		return 30 * time.Second
+	}
+	return 2 * d.cfg.HeartbeatInterval
+}
+
+// recordWSHeartbeatAck stamps the runtime as having received a fresh WS
+// heartbeat ack from the server. Called by the WS read pump.
+func (d *Daemon) recordWSHeartbeatAck(runtimeID string) {
+	if runtimeID == "" {
+		return
+	}
+	d.wsHBMu.Lock()
+	d.wsHBLastAck[runtimeID] = time.Now()
+	d.wsHBMu.Unlock()
+}
+
+// wsHeartbeatRecentlyAcked reports whether the runtime received a WS
+// heartbeat ack inside the freshness window. The HTTP heartbeat loop uses
+// this to skip duplicate work when WS is already keeping the runtime alive.
+func (d *Daemon) wsHeartbeatRecentlyAcked(runtimeID string) bool {
+	d.wsHBMu.RLock()
+	last, ok := d.wsHBLastAck[runtimeID]
+	d.wsHBMu.RUnlock()
+	if !ok {
+		return false
+	}
+	return time.Since(last) < d.wsHeartbeatFreshness()
+}
+
+// clearWSHeartbeatAcks drops all WS heartbeat freshness records. Called on
+// WS disconnect so HTTP heartbeats resume on the next tick.
+func (d *Daemon) clearWSHeartbeatAcks() {
+	d.wsHBMu.Lock()
+	for k := range d.wsHBLastAck {
+		delete(d.wsHBLastAck, k)
+	}
+	d.wsHBMu.Unlock()
 }
 
 // Run starts the daemon: resolves auth, registers runtimes, then polls for tasks.
@@ -132,10 +201,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// Start workspace sync loop to discover newly created workspaces.
 	go d.workspaceSyncLoop(ctx)
 
+	taskWakeups := make(chan struct{}, 1)
+	d.drainRuntimeSetChanged()
+	go d.taskWakeupLoop(ctx, taskWakeups)
 	go d.heartbeatLoop(ctx)
 	go d.gcLoop(ctx)
 	go d.serveHealth(ctx, healthLn, time.Now())
-	return d.pollLoop(ctx)
+	return d.pollLoop(ctx, taskWakeups)
 }
 
 // RestartBinary returns the path to the new binary if the daemon needs to restart
@@ -422,6 +494,7 @@ func (d *Daemon) syncWorkspacesFromAPI(ctx context.Context) error {
 	d.mu.Unlock()
 
 	var registered int
+	var removed int
 	for id, name := range apiIDs {
 		if currentIDs[id] {
 			continue // important: never replace existing workspaceState; ensureRepoReady holds ws.repoRefreshMu from the original pointer
@@ -473,7 +546,11 @@ func (d *Daemon) syncWorkspacesFromAPI(ctx context.Context) error {
 			delete(d.workspaces, id)
 			d.mu.Unlock()
 			d.logger.Info("stopped watching workspace", "workspace_id", id)
+			removed++
 		}
+	}
+	if registered > 0 || removed > 0 {
+		d.notifyRuntimeSetChanged()
 	}
 
 	if len(d.allRuntimeIDs()) == 0 && registered == 0 && len(workspaces) > 0 {
@@ -492,41 +569,50 @@ func (d *Daemon) heartbeatLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			for _, rid := range d.allRuntimeIDs() {
+				// Skip HTTP heartbeat for runtimes that successfully acked
+				// a recent WebSocket heartbeat. The WS path keeps last_seen_at
+				// fresh and delivers actions, so the HTTP write would be a
+				// duplicate DB update. If the WS heartbeat goes silent the
+				// freshness window expires and HTTP resumes automatically on
+				// the next tick — that is the fallback the WS path relies on.
+				if d.wsHeartbeatRecentlyAcked(rid) {
+					continue
+				}
 				resp, err := d.client.SendHeartbeat(ctx, rid)
 				if err != nil {
 					d.logger.Warn("heartbeat failed", "runtime_id", rid, "error", err)
 					continue
 				}
-
-				// Handle pending update requests.
-				if resp.PendingUpdate != nil {
-					go d.handleUpdate(ctx, rid, resp.PendingUpdate)
-				}
-
-				// Handle pending model-list requests.
-				if resp.PendingModelList != nil {
-					rt := d.findRuntime(rid)
-					if rt != nil {
-						go d.handleModelList(ctx, *rt, resp.PendingModelList.ID)
-					}
-				}
-
-				// Handle pending runtime-local-skill inventory requests.
-				if resp.PendingLocalSkills != nil {
-					rt := d.findRuntime(rid)
-					if rt != nil {
-						go d.handleLocalSkillList(ctx, *rt, resp.PendingLocalSkills.ID)
-					}
-				}
-
-				// Handle pending runtime-local-skill import requests.
-				if resp.PendingLocalSkillImport != nil {
-					rt := d.findRuntime(rid)
-					if rt != nil {
-						go d.handleLocalSkillImport(ctx, *rt, *resp.PendingLocalSkillImport)
-					}
-				}
+				d.handleHeartbeatActions(ctx, rid, resp)
 			}
+		}
+	}
+}
+
+// handleHeartbeatActions dispatches the pending-action set returned by either
+// transport (HTTP POST /api/daemon/heartbeat or WS daemon:heartbeat_ack).
+// Each action is dispatched in its own goroutine so a slow handler cannot
+// block subsequent heartbeats.
+func (d *Daemon) handleHeartbeatActions(ctx context.Context, runtimeID string, resp *HeartbeatResponse) {
+	if resp == nil {
+		return
+	}
+	if resp.PendingUpdate != nil {
+		go d.handleUpdate(ctx, runtimeID, resp.PendingUpdate)
+	}
+	if resp.PendingModelList != nil {
+		if rt := d.findRuntime(runtimeID); rt != nil {
+			go d.handleModelList(ctx, *rt, resp.PendingModelList.ID)
+		}
+	}
+	if resp.PendingLocalSkills != nil {
+		if rt := d.findRuntime(runtimeID); rt != nil {
+			go d.handleLocalSkillList(ctx, *rt, resp.PendingLocalSkills.ID)
+		}
+	}
+	if resp.PendingLocalSkillImport != nil {
+		if rt := d.findRuntime(runtimeID); rt != nil {
+			go d.handleLocalSkillImport(ctx, *rt, *resp.PendingLocalSkillImport)
 		}
 	}
 }
@@ -799,7 +885,7 @@ func (d *Daemon) triggerRestart() {
 	}
 }
 
-func (d *Daemon) pollLoop(ctx context.Context) error {
+func (d *Daemon) pollLoop(ctx context.Context, taskWakeups <-chan struct{}) error {
 	sem := make(chan struct{}, d.cfg.MaxConcurrentTasks)
 	var wg sync.WaitGroup
 
@@ -822,7 +908,7 @@ func (d *Daemon) pollLoop(ctx context.Context) error {
 
 		runtimeIDs := d.allRuntimeIDs()
 		if len(runtimeIDs) == 0 {
-			if err := sleepWithContext(ctx, d.cfg.PollInterval); err != nil {
+			if err := sleepWithContextOrWakeup(ctx, d.cfg.PollInterval, taskWakeups); err != nil {
 				wg.Wait()
 				return err
 			}
@@ -878,7 +964,7 @@ func (d *Daemon) pollLoop(ctx context.Context) error {
 				d.logger.Debug("poll: no tasks", "runtimes", runtimeIDs, "cycle", pollCount)
 			}
 			pollOffset = (pollOffset + 1) % n
-			if err := sleepWithContext(ctx, d.cfg.PollInterval); err != nil {
+			if err := sleepWithContextOrWakeup(ctx, d.cfg.PollInterval, taskWakeups); err != nil {
 				wg.Wait()
 				return err
 			}
@@ -984,7 +1070,11 @@ func (d *Daemon) handleTask(ctx context.Context, task Task) {
 		// have built a real session before getting stuck (rate-limit, tool
 		// error, etc.) and we want the next chat turn to resume there
 		// rather than start over and "forget" the conversation.
-		if err := d.client.FailTask(ctx, task.ID, result.Comment, result.SessionID, result.WorkDir, "agent_error"); err != nil {
+		failureReason := result.FailureReason
+		if failureReason == "" {
+			failureReason = "agent_error"
+		}
+		if err := d.client.FailTask(ctx, task.ID, result.Comment, result.SessionID, result.WorkDir, failureReason); err != nil {
 			taskLog.Error("report blocked task failed", "error", err)
 		}
 	default:
@@ -1051,6 +1141,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 		AutopilotDescription:    task.AutopilotDescription,
 		AutopilotSource:         task.AutopilotSource,
 		AutopilotTriggerPayload: strings.TrimSpace(string(task.AutopilotTriggerPayload)),
+		QuickCreatePrompt:       task.QuickCreatePrompt,
 	}
 
 	// Try to reuse the workdir from a previous task on the same (agent, issue) pair.
@@ -1102,6 +1193,13 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 	if task.AutopilotID != "" {
 		agentEnv["MULTICA_AUTOPILOT_ID"] = task.AutopilotID
 	}
+	// Quick-create marker — when set, the multica CLI's `issue create`
+	// command stamps the new issue with origin_type=quick_create +
+	// origin_id=<task_id> so the completion handler can find it
+	// deterministically (see GetIssueByOrigin).
+	if task.QuickCreatePrompt != "" {
+		agentEnv["MULTICA_QUICK_CREATE_TASK_ID"] = task.ID
+	}
 	// Ensure the multica CLI is on PATH inside the agent's environment.
 	// Some runtimes (e.g. Codex) run in an isolated sandbox that may not
 	// inherit the daemon's PATH. Prepend the directory of the running
@@ -1152,6 +1250,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 	taskStart := time.Now()
 
 	var customArgs []string
+	extraArgs := defaultArgsForProvider(d.cfg, provider)
 	var mcpConfig json.RawMessage
 	if task.Agent != nil {
 		customArgs = task.Agent.CustomArgs
@@ -1174,12 +1273,14 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 		model = entry.Model
 	}
 	execOpts := agent.ExecOptions{
-		Cwd:             env.WorkDir,
-		Model:           model,
-		Timeout:         d.cfg.AgentTimeout,
-		ResumeSessionID: task.PriorSessionID,
-		CustomArgs:      customArgs,
-		McpConfig:       mcpConfig,
+		Cwd:                       env.WorkDir,
+		Model:                     model,
+		Timeout:                   d.cfg.AgentTimeout,
+		SemanticInactivityTimeout: d.cfg.CodexSemanticInactivityTimeout,
+		ResumeSessionID:           task.PriorSessionID,
+		ExtraArgs:                 extraArgs,
+		CustomArgs:                customArgs,
+		McpConfig:                 mcpConfig,
 	}
 	// openclaw loads its bootstrap files (AGENTS.md, SOUL.md, ...) from its own
 	// workspace dir rather than the task workdir, so the AGENTS.md written by
@@ -1264,13 +1365,18 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 		// in sync even when the agent times out after building a session.
 		// We mark as "blocked" (not a hard error return) so handleTask
 		// goes through the FailTask path that forwards session info.
+		comment := result.Error
+		if comment == "" {
+			comment = fmt.Sprintf("%s timed out after %s", provider, d.cfg.AgentTimeout)
+		}
 		return TaskResult{
-			Status:    "blocked",
-			Comment:   fmt.Sprintf("%s timed out after %s", provider, d.cfg.AgentTimeout),
-			SessionID: result.SessionID,
-			WorkDir:   env.WorkDir,
-			EnvRoot:   env.RootDir,
-			Usage:     usageEntries,
+			Status:        "blocked",
+			Comment:       comment,
+			SessionID:     result.SessionID,
+			WorkDir:       env.WorkDir,
+			EnvRoot:       env.RootDir,
+			FailureReason: "timeout",
+			Usage:         usageEntries,
 		}, nil
 	case "cancelled":
 		// Server cancelled the task (e.g. issue reassignment, user cancel).
@@ -1363,6 +1469,8 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 				sendCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				if err := d.client.ReportTaskMessages(sendCtx, taskID, toSend); err != nil {
 					taskLog.Debug("failed to report task messages", "error", err)
+				} else {
+					taskLog.Debug("reported task messages", "count", len(toSend), "last_seq", toSend[len(toSend)-1].Seq)
 				}
 				cancel()
 			}
@@ -1436,6 +1544,7 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 						toolName = callIDToTool[msg.CallID]
 						mu.Unlock()
 					}
+					taskLog.Info("tool_result observed", "seq", s, "tool", toolName, "call_id", msg.CallID)
 					mu.Lock()
 					batch = append(batch, TaskMessageData{
 						Seq:    int(s),
@@ -1593,4 +1702,17 @@ func isBlockedEnvKey(key string) bool {
 		return true
 	}
 	return false
+}
+
+func defaultArgsForProvider(cfg Config, provider string) []string {
+	var args []string
+	switch provider {
+	case "claude":
+		args = cfg.ClaudeArgs
+	case "codex":
+		args = cfg.CodexArgs
+	default:
+		return nil
+	}
+	return append([]string(nil), args...)
 }

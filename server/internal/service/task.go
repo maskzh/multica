@@ -8,6 +8,7 @@ import (
 	"log/slog"
 
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -26,10 +27,69 @@ type TaskService struct {
 	TxStarter TxStarter
 	Hub       *realtime.Hub
 	Bus       *events.Bus
+	Wakeup    TaskWakeupNotifier
 }
 
-func NewTaskService(q *db.Queries, tx TxStarter, hub *realtime.Hub, bus *events.Bus) *TaskService {
-	return &TaskService{Queries: q, TxStarter: tx, Hub: hub, Bus: bus}
+type TaskWakeupNotifier interface {
+	NotifyTaskAvailable(runtimeID, taskID string)
+}
+
+// triggerSummaryMaxLen caps the snapshot length so the row stays cheap to
+// transmit (it ends up in every task list response). 200 is enough for a
+// recognisable preview of a one-paragraph comment.
+const triggerSummaryMaxLen = 200
+
+// truncateForSummary returns s shortened to maxRunes, with a trailing
+// `…` when truncated. Operates on runes (not bytes) so multibyte characters
+// — Chinese / emoji — count as one each. Strips surrounding whitespace
+// first so a leading newline doesn't waste budget.
+func truncateForSummary(s string, maxRunes int) string {
+	// strings.Builder + Grow avoids the O(N²) realloc cycle of `+=` in
+	// a loop. Grow uses byte length, which is an upper bound for the
+	// rune-equivalent output (replacing \n/\r/\t with space is byte-equal
+	// for ASCII whitespace), so we never reallocate.
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch r {
+		case '\n', '\r', '\t':
+			b.WriteByte(' ')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	rs := []rune(strings.TrimSpace(b.String()))
+	if len(rs) <= maxRunes {
+		return string(rs)
+	}
+	return string(rs[:maxRunes]) + "…"
+}
+
+// buildCommentTriggerSummary fetches the comment content and truncates
+// it for storage on the task row. Returns an invalid pgtype.Text when
+// the comment is missing (deleted / wrong workspace / etc) so the column
+// stays NULL — front-end falls back to a structural label in that case.
+func (s *TaskService) buildCommentTriggerSummary(ctx context.Context, commentID pgtype.UUID) pgtype.Text {
+	if !commentID.Valid {
+		return pgtype.Text{}
+	}
+	comment, err := s.Queries.GetComment(ctx, commentID)
+	if err != nil {
+		return pgtype.Text{}
+	}
+	summary := truncateForSummary(comment.Content, triggerSummaryMaxLen)
+	if summary == "" {
+		return pgtype.Text{}
+	}
+	return pgtype.Text{String: summary, Valid: true}
+}
+
+func NewTaskService(q *db.Queries, tx TxStarter, hub *realtime.Hub, bus *events.Bus, wakeups ...TaskWakeupNotifier) *TaskService {
+	var wakeup TaskWakeupNotifier
+	if len(wakeups) > 0 {
+		wakeup = wakeups[0]
+	}
+	return &TaskService{Queries: q, TxStarter: tx, Hub: hub, Bus: bus, Wakeup: wakeup}
 }
 
 // EnqueueTaskForIssue creates a queued task for an agent-assigned issue.
@@ -66,6 +126,7 @@ func (s *TaskService) EnqueueTaskForIssue(ctx context.Context, issue db.Issue, t
 		IssueID:          issue.ID,
 		Priority:         priorityToInt(issue.Priority),
 		TriggerCommentID: commentID,
+		TriggerSummary:   s.buildCommentTriggerSummary(ctx, commentID),
 	})
 	if err != nil {
 		slog.Error("task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "error", err)
@@ -73,6 +134,14 @@ func (s *TaskService) EnqueueTaskForIssue(ctx context.Context, issue db.Issue, t
 	}
 
 	slog.Info("task enqueued", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(issue.AssigneeID))
+	// Order matters: broadcast first, notify daemon second. notifyTaskAvailable
+	// kicks an in-process channel that the daemon picks up over HTTP and
+	// claims; the claim path then emits its own task:dispatch. Doing the
+	// queued broadcast afterwards risks the dispatch event reaching clients
+	// before the queued one (rare but unsafe-by-construction). Publishing
+	// in the desired observe-order makes correctness independent of timing.
+	s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
+	s.notifyTaskAvailable(task)
 	return task, nil
 }
 
@@ -100,6 +169,7 @@ func (s *TaskService) EnqueueTaskForMention(ctx context.Context, issue db.Issue,
 		IssueID:          issue.ID,
 		Priority:         priorityToInt(issue.Priority),
 		TriggerCommentID: triggerCommentID,
+		TriggerSummary:   s.buildCommentTriggerSummary(ctx, triggerCommentID),
 	})
 	if err != nil {
 		slog.Error("mention task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "error", err)
@@ -107,6 +177,77 @@ func (s *TaskService) EnqueueTaskForMention(ctx context.Context, issue db.Issue,
 	}
 
 	slog.Info("mention task enqueued", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID))
+	// See EnqueueTaskForIssue for ordering rationale.
+	s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
+	s.notifyTaskAvailable(task)
+	return task, nil
+}
+
+// QuickCreateContext is the JSON payload stored on a quick-create task's
+// context column. The daemon detects this variant via Type == "quick_create"
+// and switches to the quick-create prompt template; the completion path
+// uses RequesterID + WorkspaceID to write the inbox notification.
+type QuickCreateContext struct {
+	Type        string `json:"type"`
+	Prompt      string `json:"prompt"`
+	RequesterID string `json:"requester_id"`
+	WorkspaceID string `json:"workspace_id"`
+}
+
+// QuickCreateContextType marks a task as a quick-create job.
+const QuickCreateContextType = "quick_create"
+
+// EnqueueQuickCreateTask creates a queued task that has no issue / chat /
+// autopilot link — the user's natural-language prompt is stored in the
+// task's context JSONB and the agent is expected to translate it into a
+// `multica issue create` call. Pre-validates that the agent is reachable
+// (not archived, has a runtime) so the API can reject up-front rather than
+// queue a task no one will ever claim.
+func (s *TaskService) EnqueueQuickCreateTask(ctx context.Context, workspaceID, requesterID pgtype.UUID, agentID pgtype.UUID, prompt string) (db.AgentTaskQueue, error) {
+	agent, err := s.Queries.GetAgent(ctx, agentID)
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("load agent: %w", err)
+	}
+	if agent.ArchivedAt.Valid {
+		return db.AgentTaskQueue{}, fmt.Errorf("agent is archived")
+	}
+	if !agent.RuntimeID.Valid {
+		return db.AgentTaskQueue{}, fmt.Errorf("agent has no runtime")
+	}
+
+	payload := QuickCreateContext{
+		Type:        QuickCreateContextType,
+		Prompt:      prompt,
+		RequesterID: util.UUIDToString(requesterID),
+		WorkspaceID: util.UUIDToString(workspaceID),
+	}
+	contextJSON, err := json.Marshal(payload)
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("marshal quick-create context: %w", err)
+	}
+
+	task, err := s.Queries.CreateQuickCreateTask(ctx, db.CreateQuickCreateTaskParams{
+		AgentID:   agentID,
+		RuntimeID: agent.RuntimeID,
+		Priority:  priorityToInt("high"),
+		Context:   contextJSON,
+	})
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("create quick-create task: %w", err)
+	}
+
+	slog.Info("quick-create task enqueued",
+		"task_id", util.UUIDToString(task.ID),
+		"agent_id", util.UUIDToString(agentID),
+		"requester_id", util.UUIDToString(requesterID),
+		"workspace_id", util.UUIDToString(workspaceID),
+	)
+	// Match every other Enqueue* path: kick the daemon WS so the task
+	// gets claimed promptly instead of waiting for the next 30 s poll
+	// cycle. Without this the user perceives "quick create never
+	// triggered" because the modal closes immediately and the task
+	// sits in 'queued' until the next sleepWithContextOrWakeup tick.
+	s.notifyTaskAvailable(task)
 	return task, nil
 }
 
@@ -137,6 +278,9 @@ func (s *TaskService) EnqueueChatTask(ctx context.Context, chatSession db.ChatSe
 	}
 
 	slog.Info("chat task enqueued", "task_id", util.UUIDToString(task.ID), "chat_session_id", util.UUIDToString(chatSession.ID), "agent_id", util.UUIDToString(chatSession.AgentID))
+	// See EnqueueTaskForIssue for ordering rationale.
+	s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
+	s.notifyTaskAvailable(task)
 	return task, nil
 }
 
@@ -151,6 +295,45 @@ func (s *TaskService) EnqueueChatTask(ctx context.Context, chatSession db.ChatSe
 // pattern already used by CancelTask and RerunIssue.
 func (s *TaskService) CancelTasksForIssue(ctx context.Context, issueID pgtype.UUID) error {
 	cancelled, err := s.Queries.CancelAgentTasksByIssue(ctx, issueID)
+	if err != nil {
+		return err
+	}
+	for _, t := range cancelled {
+		s.ReconcileAgentStatus(ctx, t.AgentID)
+		s.broadcastTaskEvent(ctx, protocol.EventTaskCancelled, t)
+	}
+	return nil
+}
+
+// CancelTasksForAgent cancels every active task belonging to an agent
+// (queued + dispatched + running), reconciles the agent's status, and
+// broadcasts task:cancelled events. Used by the agent-level "Cancel all
+// tasks" action — same shape as CancelTasksForIssue but scoped on agent_id.
+//
+// Returns the cancelled rows so callers can report counts / log them.
+func (s *TaskService) CancelTasksForAgent(ctx context.Context, agentID pgtype.UUID) ([]db.AgentTaskQueue, error) {
+	cancelled, err := s.Queries.CancelAgentTasksByAgent(ctx, agentID)
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range cancelled {
+		s.broadcastTaskEvent(ctx, protocol.EventTaskCancelled, t)
+	}
+	// Reconcile once after the loop — agent transitions from
+	// working→available based on remaining task counts, no need to call
+	// per row (the rows we just cancelled all belong to the same agent).
+	s.ReconcileAgentStatus(ctx, agentID)
+	return cancelled, nil
+}
+
+// CancelTasksByTriggerComment cancels active tasks whose trigger is the given
+// comment. Called from DeleteComment so an agent does not run with the
+// now-deleted content already embedded in its prompt. Must be invoked BEFORE
+// the comment row is deleted because the FK ON DELETE SET NULL would
+// otherwise nullify trigger_comment_id and we'd lose the ability to find
+// the affected tasks.
+func (s *TaskService) CancelTasksByTriggerComment(ctx context.Context, commentID pgtype.UUID) error {
+	cancelled, err := s.Queries.CancelAgentTasksByTriggerComment(ctx, commentID)
 	if err != nil {
 		return err
 	}
@@ -192,7 +375,7 @@ func (s *TaskService) CancelTask(ctx context.Context, taskID pgtype.UUID) (*db.A
 func (s *TaskService) ClaimTask(ctx context.Context, agentID pgtype.UUID) (*db.AgentTaskQueue, error) {
 	start := time.Now()
 	var (
-		outcome                                                            = "unknown"
+		outcome                                                              = "unknown"
 		getAgentMs, countRunningMs, claimAgentMs, updateStatusMs, dispatchMs int64
 	)
 	defer func() {
@@ -235,10 +418,10 @@ func (s *TaskService) ClaimTask(ctx context.Context, agentID pgtype.UUID) (*db.A
 
 	slog.Info("task claimed", "task_id", util.UUIDToString(task.ID), "agent_id", util.UUIDToString(agentID))
 
-	// Update agent status to working. Hits the DB and may publish events,
-	// so it must be inside the timed window.
+	// Refresh agent status from active tasks. This avoids a stale unconditional
+	// working write racing after a just-cancelled claim.
 	t0 = time.Now()
-	s.updateAgentStatus(ctx, agentID, "working")
+	s.ReconcileAgentStatus(ctx, agentID)
 	updateStatusMs = time.Since(t0).Milliseconds()
 
 	// Broadcast task:dispatch. ResolveTaskWorkspaceID inside this path can
@@ -257,10 +440,10 @@ func (s *TaskService) ClaimTask(ctx context.Context, agentID pgtype.UUID) (*db.A
 func (s *TaskService) ClaimTaskForRuntime(ctx context.Context, runtimeID pgtype.UUID) (*db.AgentTaskQueue, error) {
 	start := time.Now()
 	var (
-		outcome             = "no_task"
-		listMs, loopMs      int64
-		listCount, tried    int
-		claimedFlag         bool
+		outcome          = "no_task"
+		listMs, loopMs   int64
+		listCount, tried int
+		claimedFlag      bool
 	)
 	defer func() {
 		totalMs := time.Since(start).Milliseconds()
@@ -438,10 +621,25 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 			var payload protocol.TaskCompletedPayload
 			if err := json.Unmarshal(result, &payload); err == nil {
 				if payload.Output != "" {
-					s.createAgentComment(ctx, task.IssueID, task.AgentID, redact.Text(payload.Output), "comment", task.TriggerCommentID)
+					// Match the CLI's --content / --description behavior: agents that
+					// emit literal `\n` 4-char sequences (Python/JSON-style) get them
+					// decoded into real newlines before the comment hits the DB. See
+					// util.UnescapeBackslashEscapes for the exact contract.
+					body := util.UnescapeBackslashEscapes(payload.Output)
+					s.createAgentComment(ctx, task.IssueID, task.AgentID, redact.Text(body), "comment", task.TriggerCommentID)
 				}
 			}
 		}
+	}
+
+	// Quick-create tasks: locate the issue the agent just created and push
+	// an inbox confirmation to the requester. The agent has no issue / chat
+	// link, so the regular completion paths above don't apply. We find the
+	// new issue by querying for the most recent issue this agent created in
+	// the requester's workspace since the task started — more robust than
+	// parsing the agent's stdout for an identifier.
+	if qc, ok := s.parseQuickCreateContext(task); ok {
+		s.notifyQuickCreateCompleted(ctx, task, qc)
 	}
 
 	// For chat tasks, save assistant reply and broadcast chat:done. The
@@ -449,10 +647,14 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 	if task.ChatSessionID.Valid {
 		var payload protocol.TaskCompletedPayload
 		if err := json.Unmarshal(result, &payload); err == nil && payload.Output != "" {
+			// Same unescape as the issue-comment path above: literal `\n` from
+			// agent stdout becomes a real newline so the chat panel renders
+			// paragraph breaks instead of one wall of prose.
+			body := util.UnescapeBackslashEscapes(payload.Output)
 			if _, err := s.Queries.CreateChatMessage(ctx, db.CreateChatMessageParams{
 				ChatSessionID: task.ChatSessionID,
 				Role:          "assistant",
-				Content:       redact.Text(payload.Output),
+				Content:       redact.Text(body),
 				TaskID:        task.ID,
 			}); err != nil {
 				slog.Error("failed to save assistant chat message", "task_id", util.UUIDToString(task.ID), "error", err)
@@ -555,6 +757,16 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 	if errMsg != "" && task.IssueID.Valid && retried == nil {
 		s.createAgentComment(ctx, task.IssueID, task.AgentID, redact.Text(errMsg), "system", task.TriggerCommentID)
 	}
+
+	// Quick-create tasks: push a failure inbox notification to the
+	// requester so they can either retry or fall back to the advanced form
+	// without losing their original prompt. Skipped when an auto-retry is
+	// pending — the new attempt will write its own outcome.
+	if retried == nil {
+		if qc, ok := s.parseQuickCreateContext(task); ok {
+			s.notifyQuickCreateFailed(ctx, task, qc, errMsg)
+		}
+	}
 	// Reconcile agent status
 	s.ReconcileAgentStatus(ctx, task.AgentID)
 
@@ -627,7 +839,11 @@ func (s *TaskService) MaybeRetryFailedTask(ctx context.Context, parent db.AgentT
 		"attempt", child.Attempt,
 		"max_attempts", child.MaxAttempts,
 	)
-	s.broadcastTaskEvent(ctx, protocol.EventTaskDispatch, child)
+	// Retry creates a fresh queued row, same status transition (∅ → queued)
+	// as EnqueueTaskFor*. Broadcast queued first, then notify the daemon —
+	// see EnqueueTaskForIssue for ordering rationale.
+	s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, child)
+	s.notifyTaskAvailable(child)
 	return &child, nil
 }
 
@@ -806,18 +1022,14 @@ func (s *TaskService) ReportProgress(ctx context.Context, taskID string, workspa
 	})
 }
 
-// ReconcileAgentStatus checks running task count and sets agent status accordingly.
+// ReconcileAgentStatus refreshes agent status from the current active task set.
 func (s *TaskService) ReconcileAgentStatus(ctx context.Context, agentID pgtype.UUID) {
-	running, err := s.Queries.CountRunningTasks(ctx, agentID)
+	agent, err := s.Queries.RefreshAgentStatusFromTasks(ctx, agentID)
 	if err != nil {
 		return
 	}
-	newStatus := "idle"
-	if running > 0 {
-		newStatus = "working"
-	}
-	slog.Debug("agent status reconciled", "agent_id", util.UUIDToString(agentID), "status", newStatus, "running_tasks", running)
-	s.updateAgentStatus(ctx, agentID, newStatus)
+	slog.Debug("agent status reconciled", "agent_id", util.UUIDToString(agentID), "status", agent.Status)
+	s.publishAgentStatus(agent)
 }
 
 func (s *TaskService) updateAgentStatus(ctx context.Context, agentID pgtype.UUID, status string) {
@@ -828,6 +1040,10 @@ func (s *TaskService) updateAgentStatus(ctx context.Context, agentID pgtype.UUID
 	if err != nil {
 		return
 	}
+	s.publishAgentStatus(agent)
+}
+
+func (s *TaskService) publishAgentStatus(agent db.Agent) {
 	s.Bus.Publish(events.Event{
 		Type:        protocol.EventAgentStatus,
 		WorkspaceID: util.UUIDToString(agent.WorkspaceID),
@@ -882,6 +1098,13 @@ func priorityToInt(p string) int32 {
 	default:
 		return 0
 	}
+}
+
+func (s *TaskService) notifyTaskAvailable(task db.AgentTaskQueue) {
+	if s.Wakeup == nil || !task.RuntimeID.Valid {
+		return
+	}
+	s.Wakeup.NotifyTaskAvailable(util.UUIDToString(task.RuntimeID), util.UUIDToString(task.ID))
 }
 
 func (s *TaskService) broadcastTaskDispatch(ctx context.Context, task db.AgentTaskQueue) {
@@ -954,6 +1177,14 @@ func (s *TaskService) ResolveTaskWorkspaceID(ctx context.Context, task db.AgentT
 				return util.UUIDToString(ap.WorkspaceID)
 			}
 		}
+	}
+	// Quick-create tasks have no issue / chat / autopilot link — workspace
+	// lives in the context JSONB. Returning "" here is what blocked
+	// requireDaemonTaskAccess (404 on /start, /progress, /complete, /fail
+	// for the daemon) and silently dropped task:dispatch / task:completed
+	// broadcasts, which is why quick-create tasks appeared stuck queued.
+	if qc, ok := s.parseQuickCreateContext(task); ok {
+		return qc.WorkspaceID
 	}
 	return ""
 }
@@ -1067,6 +1298,179 @@ func issueToMap(issue db.Issue, issuePrefix string) map[string]any {
 		"created_at":      util.TimestampToString(issue.CreatedAt),
 		"updated_at":      util.TimestampToString(issue.UpdatedAt),
 	}
+}
+
+// parseQuickCreateContext returns the quick-create payload if the task's
+// context JSONB contains type == "quick_create"; otherwise the bool is
+// false so callers can short-circuit. Tasks linked to an issue / chat /
+// autopilot are never quick-create even if they happen to carry a
+// context blob, so those are filtered up front.
+func (s *TaskService) parseQuickCreateContext(task db.AgentTaskQueue) (QuickCreateContext, bool) {
+	if task.IssueID.Valid || task.ChatSessionID.Valid || task.AutopilotRunID.Valid {
+		return QuickCreateContext{}, false
+	}
+	if len(task.Context) == 0 {
+		return QuickCreateContext{}, false
+	}
+	var qc QuickCreateContext
+	if err := json.Unmarshal(task.Context, &qc); err != nil {
+		return QuickCreateContext{}, false
+	}
+	if qc.Type != QuickCreateContextType {
+		return QuickCreateContext{}, false
+	}
+	return qc, true
+}
+
+// notifyQuickCreateCompleted writes a success inbox notification to the
+// requester pointing at the issue the agent just created. The issue is
+// stamped with origin_type=quick_create + origin_id=<task_id> by the
+// daemon-injected MULTICA_QUICK_CREATE_TASK_ID env var, so this lookup is
+// deterministic — robust against the same agent creating other issues in
+// parallel (e.g. assignment task running while max_concurrent_tasks > 1
+// permits another quick-create alongside it).
+func (s *TaskService) notifyQuickCreateCompleted(ctx context.Context, task db.AgentTaskQueue, qc QuickCreateContext) {
+	requesterID, err := util.ParseUUID(qc.RequesterID)
+	if err != nil {
+		slog.Warn("quick-create completion: invalid requester id", "task_id", util.UUIDToString(task.ID), "error", err)
+		return
+	}
+	workspaceID, err := util.ParseUUID(qc.WorkspaceID)
+	if err != nil {
+		slog.Warn("quick-create completion: invalid workspace id", "task_id", util.UUIDToString(task.ID), "error", err)
+		return
+	}
+	issue, err := s.Queries.GetIssueByOrigin(ctx, db.GetIssueByOriginParams{
+		WorkspaceID: workspaceID,
+		OriginType:  pgtype.Text{String: "quick_create", Valid: true},
+		OriginID:    task.ID,
+	})
+	if err != nil {
+		// No issue created — agent ran to completion but the CLI call must
+		// have failed. Surface as a failure inbox so the user sees something.
+		slog.Warn("quick-create completion: no issue found, writing failure inbox",
+			"task_id", util.UUIDToString(task.ID),
+			"agent_id", util.UUIDToString(task.AgentID),
+			"workspace_id", qc.WorkspaceID,
+		)
+		s.notifyQuickCreateFailed(ctx, task, qc, "agent finished without creating an issue")
+		return
+	}
+
+	// Link the new issue back to this task so subsequent reads of the task
+	// (Activity tab, Recent work, etc.) render it as a normal issue task
+	// (kind = "direct") instead of staying on the "Creating issue" active-
+	// wording label. Best-effort: a write failure here doesn't block the
+	// inbox notification, which is the more important signal to the user.
+	if err := s.Queries.LinkTaskToIssue(ctx, db.LinkTaskToIssueParams{
+		ID:      task.ID,
+		IssueID: issue.ID,
+	}); err != nil {
+		slog.Warn("quick-create completion: link task→issue failed",
+			"task_id", util.UUIDToString(task.ID),
+			"issue_id", util.UUIDToString(issue.ID),
+			"error", err,
+		)
+	}
+	prefix := s.getIssuePrefix(workspaceID)
+	identifier := fmt.Sprintf("%s-%d", prefix, issue.Number)
+	details, _ := json.Marshal(map[string]any{
+		"task_id":    util.UUIDToString(task.ID),
+		"agent_id":   util.UUIDToString(task.AgentID),
+		"issue_id":   util.UUIDToString(issue.ID),
+		"identifier": identifier,
+	})
+	item, err := s.Queries.CreateInboxItem(ctx, db.CreateInboxItemParams{
+		WorkspaceID:   workspaceID,
+		RecipientType: "member",
+		RecipientID:   requesterID,
+		Type:          "quick_create_done",
+		Severity:      "info",
+		IssueID:       issue.ID,
+		Title:         fmt.Sprintf("Created %s: %s", identifier, issue.Title),
+		Body:          pgtype.Text{},
+		ActorType:     pgtype.Text{String: "agent", Valid: true},
+		ActorID:       task.AgentID,
+		Details:       details,
+	})
+	if err != nil {
+		slog.Error("quick-create completion: inbox write failed", "task_id", util.UUIDToString(task.ID), "error", err)
+		return
+	}
+	s.publishQuickCreateInbox(item, qc.WorkspaceID, util.UUIDToString(task.AgentID), issue.Status)
+}
+
+// notifyQuickCreateFailed writes a failure inbox notification carrying the
+// original prompt + agent ID so the frontend can render an "Edit as
+// advanced form" entry that pre-fills the legacy create-issue modal
+// without asking the user to retype.
+func (s *TaskService) notifyQuickCreateFailed(ctx context.Context, task db.AgentTaskQueue, qc QuickCreateContext, errMsg string) {
+	requesterID, err := util.ParseUUID(qc.RequesterID)
+	if err != nil {
+		return
+	}
+	workspaceID, err := util.ParseUUID(qc.WorkspaceID)
+	if err != nil {
+		return
+	}
+	if errMsg == "" {
+		errMsg = "Quick create did not finish successfully"
+	}
+	details, _ := json.Marshal(map[string]any{
+		"task_id":         util.UUIDToString(task.ID),
+		"agent_id":        util.UUIDToString(task.AgentID),
+		"original_prompt": qc.Prompt,
+		"error":           redact.Text(errMsg),
+	})
+	item, err := s.Queries.CreateInboxItem(ctx, db.CreateInboxItemParams{
+		WorkspaceID:   workspaceID,
+		RecipientType: "member",
+		RecipientID:   requesterID,
+		Type:          "quick_create_failed",
+		Severity:      "action_required",
+		IssueID:       pgtype.UUID{},
+		Title:         "Quick create failed",
+		Body:          pgtype.Text{String: redact.Text(errMsg), Valid: true},
+		ActorType:     pgtype.Text{String: "agent", Valid: true},
+		ActorID:       task.AgentID,
+		Details:       details,
+	})
+	if err != nil {
+		slog.Error("quick-create failure: inbox write failed", "task_id", util.UUIDToString(task.ID), "error", err)
+		return
+	}
+	s.publishQuickCreateInbox(item, qc.WorkspaceID, util.UUIDToString(task.AgentID), "")
+}
+
+// publishQuickCreateInbox emits the WS event so the requester's inbox list
+// updates immediately. Mirrors the payload shape used by the other inbox
+// listeners (notification_listeners.go).
+func (s *TaskService) publishQuickCreateInbox(item db.InboxItem, workspaceID, agentID, issueStatus string) {
+	resp := map[string]any{
+		"id":             util.UUIDToString(item.ID),
+		"workspace_id":   util.UUIDToString(item.WorkspaceID),
+		"recipient_type": item.RecipientType,
+		"recipient_id":   util.UUIDToString(item.RecipientID),
+		"type":           item.Type,
+		"severity":       item.Severity,
+		"issue_id":       util.UUIDToPtr(item.IssueID),
+		"title":          item.Title,
+		"body":           util.TextToPtr(item.Body),
+		"read":           item.Read,
+		"archived":       item.Archived,
+		"created_at":     util.TimestampToString(item.CreatedAt),
+		"actor_type":     util.TextToPtr(item.ActorType),
+		"actor_id":       util.UUIDToPtr(item.ActorID),
+		"details":        json.RawMessage(item.Details),
+		"issue_status":   issueStatus,
+	}
+	s.Bus.Publish(events.Event{
+		Type:        protocol.EventInboxNew,
+		WorkspaceID: workspaceID,
+		ActorType:   "agent",
+		ActorID:     agentID,
+		Payload:     map[string]any{"item": resp},
+	})
 }
 
 // agentToMap builds a simple map for broadcasting agent status updates.

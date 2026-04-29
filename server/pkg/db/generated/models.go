@@ -90,6 +90,7 @@ type AgentTaskQueue struct {
 	ParentTaskID     pgtype.UUID        `json:"parent_task_id"`
 	FailureReason    pgtype.Text        `json:"failure_reason"`
 	LastHeartbeatAt  pgtype.Timestamptz `json:"last_heartbeat_at"`
+	TriggerSummary   pgtype.Text        `json:"trigger_summary"`
 }
 
 type Attachment struct {
@@ -279,10 +280,12 @@ type IssueDependency struct {
 }
 
 type IssueLabel struct {
-	ID          pgtype.UUID `json:"id"`
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
-	Name        string      `json:"name"`
-	Color       string      `json:"color"`
+	ID          pgtype.UUID        `json:"id"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	Name        string             `json:"name"`
+	Color       string             `json:"color"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 }
 
 type IssueReaction struct {

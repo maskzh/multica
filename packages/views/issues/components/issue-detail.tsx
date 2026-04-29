@@ -34,14 +34,16 @@ import { Checkbox } from "@multica/ui/components/ui/checkbox";
 import { Command, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem } from "@multica/ui/components/ui/command";
 import { AvatarGroup, AvatarGroupCount } from "@multica/ui/components/ui/avatar";
 import { ActorAvatar } from "../../common/actor-avatar";
+import { PropRow } from "../../common/prop-row";
 import type { IssueStatus, IssuePriority, TimelineEntry } from "@multica/core/types";
 import { STATUS_CONFIG, PRIORITY_CONFIG } from "@multica/core/issues/config";
-import { StatusIcon, PriorityIcon, StatusPicker, PriorityPicker, DueDatePicker, AssigneePicker } from ".";
+import { StatusIcon, PriorityIcon, StatusPicker, PriorityPicker, DueDatePicker, AssigneePicker, LabelPicker } from ".";
 import { IssueActionsDropdown, useIssueActions } from "../actions";
 import { ProjectPicker } from "../../projects/components/project-picker";
 import { CommentCard } from "./comment-card";
 import { CommentInput } from "./comment-input";
-import { AgentLiveCard, TaskRunHistory } from "./agent-live-card";
+import { AgentLiveCard } from "./agent-live-card";
+import { ExecutionLogSection } from "./execution-log-section";
 import { useQuery } from "@tanstack/react-query";
 import { useAuthStore } from "@multica/core/auth";
 import { useCurrentWorkspace, useWorkspacePaths } from "@multica/core/paths";
@@ -128,28 +130,6 @@ function formatTokenCount(n: number): string {
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
   return String(n);
 }
-
-// ---------------------------------------------------------------------------
-// Property row
-// ---------------------------------------------------------------------------
-
-function PropRow({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex min-h-8 items-center gap-2 rounded-md px-2 -mx-2 hover:bg-accent/50 transition-colors">
-      <span className="w-16 shrink-0 text-xs text-muted-foreground">{label}</span>
-      <div className="flex min-w-0 flex-1 items-center gap-1.5 text-xs truncate">
-        {children}
-      </div>
-    </div>
-  );
-}
-
 
 // ---------------------------------------------------------------------------
 // Props
@@ -408,6 +388,9 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
           <PropRow label="Project">
             <ProjectPicker projectId={issue.project_id} onUpdate={handleUpdateField} />
           </PropRow>
+          <PropRow label="Labels">
+            <LabelPicker issueId={issue.id} align="start" />
+          </PropRow>
         </div>}
       </div>
 
@@ -445,8 +428,8 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
         </button>
         {detailsOpen && <div className="space-y-0.5 pl-2">
           <PropRow label="Created by">
-            <ActorAvatar actorType={issue.creator_type} actorId={issue.creator_id} size={18} />
-            <span className="truncate">{getActorName(issue.creator_type, issue.creator_id)}</span>
+            <ActorAvatar actorType={issue.creator_type} actorId={issue.creator_id} size={18} enableHoverCard />
+            <span className="cursor-pointer truncate">{getActorName(issue.creator_type, issue.creator_id)}</span>
           </PropRow>
           <PropRow label="Created">
             <span className="text-muted-foreground">{shortDate(issue.created_at)}</span>
@@ -456,6 +439,11 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
           </PropRow>
         </div>}
       </div>
+
+      {/* Execution log — active runs + collapsed past runs. Self-contained;
+          owns its own collapse state and WS subscriptions. Hides itself
+          when there are no runs to show. */}
+      <ExecutionLogSection issueId={id} />
 
       {/* Token usage */}
       {usage && usage.task_count > 0 && (
@@ -746,6 +734,7 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
                               actorId={child.assignee_id}
                               size={20}
                               className="shrink-0"
+                              enableHoverCard
                             />
                           ) : (
                             <span
@@ -787,6 +776,7 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
                             actorType={sub.user_type}
                             actorId={sub.user_id}
                             size={24}
+                            enableHoverCard
                           />
                         ))}
                         {subscribers.length > 4 && (
@@ -836,7 +826,7 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
                                   className="flex items-center gap-2.5"
                                 >
                                   <Checkbox checked={isSubbed} className="pointer-events-none" />
-                                  <ActorAvatar actorType="agent" actorId={a.id} size={22} />
+                                  <ActorAvatar actorType="agent" actorId={a.id} size={22} showStatusDot />
                                   <span className="truncate flex-1">{a.name}</span>
 
                                 </CommandItem>
@@ -851,16 +841,13 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
               </div>
             </div>
 
-            {/* Agent live output — sticky inside the Activity section so it
-                stays pinned while scrolling through TaskRunHistory + comments.
-                Keyed by issue id so switching issues remounts the card and
-                clears any in-flight task state from the previous issue. */}
+            {/* Agent live output — sticky banner in the activity section,
+                keyed by issue id so switching issues remounts the card and
+                clears any in-flight task state from the previous issue.
+                The execution log itself (per-task timeline + past runs)
+                lives in the right panel via ExecutionLogSection — this
+                card is just a header-style "agent is working" anchor. */}
             <AgentLiveCard key={id} issueId={id} />
-
-            {/* Agent execution history */}
-            <div className="mt-3">
-              <TaskRunHistory key={id} issueId={id} />
-            </div>
 
             {/* Timeline entries */}
             <div className="mt-4 flex flex-col gap-3">

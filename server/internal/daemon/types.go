@@ -46,6 +46,7 @@ type Task struct {
 	AutopilotDescription    string          `json:"autopilot_description,omitempty"`     // autopilot description used as task prompt
 	AutopilotSource         string          `json:"autopilot_source,omitempty"`          // manual, schedule, webhook, or api
 	AutopilotTriggerPayload json.RawMessage `json:"autopilot_trigger_payload,omitempty"` // optional trigger payload for webhook/api runs
+	QuickCreatePrompt       string          `json:"quick_create_prompt,omitempty"`       // user's natural-language input for quick-create tasks
 }
 
 // AgentData holds agent details returned by the claim endpoint.
@@ -85,12 +86,13 @@ type TaskUsageEntry struct {
 
 // TaskResult is the outcome of executing a task.
 type TaskResult struct {
-	Status     string           `json:"status"`
-	Comment    string           `json:"comment"`
-	BranchName string           `json:"branch_name,omitempty"`
-	EnvType    string           `json:"env_type,omitempty"`
-	SessionID  string           `json:"session_id,omitempty"` // Claude session ID for future resumption
-	WorkDir    string           `json:"work_dir,omitempty"`   // working directory used during execution
-	EnvRoot    string           `json:"-"`                    // env root dir for writing GC metadata (not sent to server)
-	Usage      []TaskUsageEntry `json:"usage,omitempty"`      // per-model token usage
+	Status        string           `json:"status"`
+	Comment       string           `json:"comment"`
+	BranchName    string           `json:"branch_name,omitempty"`
+	EnvType       string           `json:"env_type,omitempty"`
+	SessionID     string           `json:"session_id,omitempty"` // Claude session ID for future resumption
+	WorkDir       string           `json:"work_dir,omitempty"`   // working directory used during execution
+	EnvRoot       string           `json:"-"`                    // env root dir for writing GC metadata (not sent to server)
+	FailureReason string           `json:"-"`                    // internal server failure classification
+	Usage         []TaskUsageEntry `json:"usage,omitempty"`      // per-model token usage
 }
