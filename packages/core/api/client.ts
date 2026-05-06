@@ -42,7 +42,8 @@ import type {
   RuntimeLocalSkillListRequest,
   CreateRuntimeLocalSkillImportRequest,
   RuntimeLocalSkillImportRequest,
-  TimelineEntry,
+  TimelinePage,
+  TimelinePageParam,
   AssigneeFrequencyEntry,
   TaskMessagePayload,
   Attachment,
@@ -55,6 +56,9 @@ import type {
   CreateProjectRequest,
   UpdateProjectRequest,
   ListProjectsResponse,
+  ProjectResource,
+  CreateProjectResourceRequest,
+  ListProjectResourcesResponse,
   Label,
   CreateLabelRequest,
   UpdateLabelRequest,
@@ -75,6 +79,8 @@ import type {
   ListAutopilotsResponse,
   GetAutopilotResponse,
   ListAutopilotRunsResponse,
+  NotificationPreferenceResponse,
+  NotificationPreferences,
 } from "../types";
 import type { OnboardingCompletionPath } from "../onboarding/types";
 import { type Logger, noopLogger } from "../logger";
@@ -489,8 +495,17 @@ export class ApiClient {
     });
   }
 
-  async listTimeline(issueId: string): Promise<TimelineEntry[]> {
-    return this.fetch(`/api/issues/${issueId}/timeline`);
+  async listTimeline(
+    issueId: string,
+    pageParam: TimelinePageParam = { mode: "latest" },
+    limit = 50,
+  ): Promise<TimelinePage> {
+    const params = new URLSearchParams();
+    params.set("limit", String(limit));
+    if (pageParam.mode === "before") params.set("before", pageParam.cursor);
+    else if (pageParam.mode === "after") params.set("after", pageParam.cursor);
+    else if (pageParam.mode === "around") params.set("around", pageParam.id);
+    return this.fetch(`/api/issues/${issueId}/timeline?${params.toString()}`);
   }
 
   async getAssigneeFrequency(): Promise<AssigneeFrequencyEntry[]> {
@@ -783,6 +798,18 @@ export class ApiClient {
     return this.fetch("/api/inbox/archive-completed", { method: "POST" });
   }
 
+  // Notification preferences
+  async getNotificationPreferences(): Promise<NotificationPreferenceResponse> {
+    return this.fetch("/api/notification-preferences");
+  }
+
+  async updateNotificationPreferences(preferences: NotificationPreferences): Promise<NotificationPreferenceResponse> {
+    return this.fetch("/api/notification-preferences", {
+      method: "PUT",
+      body: JSON.stringify({ preferences }),
+    });
+  }
+
   // App Config
   async getConfig(): Promise<{
     cdn_domain: string;
@@ -992,7 +1019,7 @@ export class ApiClient {
     });
   }
 
-  async archiveChatSession(id: string): Promise<void> {
+  async deleteChatSession(id: string): Promise<void> {
     await this.fetch(`/api/chat/sessions/${id}`, { method: "DELETE" });
   }
 
@@ -1058,6 +1085,32 @@ export class ApiClient {
 
   async deleteProject(id: string): Promise<void> {
     await this.fetch(`/api/projects/${id}`, { method: "DELETE" });
+  }
+
+  // Project resources
+  async listProjectResources(
+    projectId: string,
+  ): Promise<ListProjectResourcesResponse> {
+    return this.fetch(`/api/projects/${projectId}/resources`);
+  }
+
+  async createProjectResource(
+    projectId: string,
+    data: CreateProjectResourceRequest,
+  ): Promise<ProjectResource> {
+    return this.fetch(`/api/projects/${projectId}/resources`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteProjectResource(
+    projectId: string,
+    resourceId: string,
+  ): Promise<void> {
+    await this.fetch(`/api/projects/${projectId}/resources/${resourceId}`, {
+      method: "DELETE",
+    });
   }
 
   // Labels

@@ -1,10 +1,27 @@
 import { render, screen, waitFor } from "@testing-library/react";
-import { createRef } from "react";
+import { createRef, type ReactNode } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { workspaceKeys } from "@multica/core/workspace/queries";
 import { issueKeys, PAGINATED_STATUSES } from "@multica/core/issues/queries";
+import { I18nProvider } from "@multica/core/i18n/react";
 import type { IssueStatus, ListIssuesCache } from "@multica/core/types";
 import type { QueryClient } from "@tanstack/react-query";
+import enCommon from "../../locales/en/common.json";
+import enAuth from "../../locales/en/auth.json";
+import enSettings from "../../locales/en/settings.json";
+import enEditor from "../../locales/en/editor.json";
+
+const TEST_RESOURCES = {
+  en: { common: enCommon, auth: enAuth, settings: enSettings, editor: enEditor },
+};
+
+function I18nWrapper({ children }: { children: ReactNode }) {
+  return (
+    <I18nProvider locale="en" resources={TEST_RESOURCES}>
+      {children}
+    </I18nProvider>
+  );
+}
 
 // Mock the workspace id singleton — items() reads it imperatively.
 vi.mock("@multica/core/platform", () => ({
@@ -21,6 +38,13 @@ vi.mock("@multica/core/api", () => ({
   },
 }));
 
+// Mock the auth store: items() reads `useAuthStore.getState()` imperatively
+// to identify the current user when filtering personal agents.
+const authState = { user: { id: "u1" } as { id: string } | null };
+vi.mock("@multica/core/auth", () => ({
+  useAuthStore: { getState: () => authState },
+}));
+
 import {
   createMentionSuggestion,
   MentionList,
@@ -29,8 +53,14 @@ import {
 } from "./mention-suggestion";
 
 function fakeQc(data: {
-  members?: Array<{ user_id: string; name: string }>;
-  agents?: Array<{ id: string; name: string; archived_at: string | null }>;
+  members?: Array<{ user_id: string; name: string; role?: string }>;
+  agents?: Array<{
+    id: string;
+    name: string;
+    archived_at: string | null;
+    visibility?: "workspace" | "private";
+    owner_id?: string | null;
+  }>;
   issues?: Array<{ id: string; identifier: string; title: string; status: string }>;
 }): QueryClient {
   const map = new Map<string, unknown>();
@@ -57,8 +87,16 @@ describe("createMentionSuggestion", () => {
 
   it("returns members and agents synchronously without waiting for the server search", () => {
     const qc = fakeQc({
-      members: [{ user_id: "u1", name: "Alice" }],
-      agents: [{ id: "a1", name: "Aegis", archived_at: null }],
+      members: [{ user_id: "u1", name: "Alice", role: "member" }],
+      agents: [
+        {
+          id: "a1",
+          name: "Aegis",
+          archived_at: null,
+          visibility: "workspace",
+          owner_id: null,
+        },
+      ],
     });
     // A pending fetch — would block the result if items() awaited it.
     searchIssuesMock.mockReturnValue(new Promise(() => {}));
@@ -86,7 +124,7 @@ describe("createMentionSuggestion", () => {
       total: 1,
     });
 
-    render(<MentionList items={[]} query="协作" command={vi.fn()} />);
+    render(<I18nWrapper><MentionList items={[]} query="协作" command={vi.fn()} /></I18nWrapper>);
 
     expect(screen.getByText("Searching...")).toBeInTheDocument();
 
@@ -104,7 +142,7 @@ describe("createMentionSuggestion", () => {
   });
 
   it("does not call searchIssues for an empty query", () => {
-    render(<MentionList items={[]} query="" command={vi.fn()} />);
+    render(<I18nWrapper><MentionList items={[]} query="" command={vi.fn()} /></I18nWrapper>);
 
     expect(searchIssuesMock).not.toHaveBeenCalled();
   });
@@ -112,11 +150,83 @@ describe("createMentionSuggestion", () => {
   it("captures Enter while the popup has no selectable items", () => {
     const ref = createRef<MentionListRef>();
 
-    render(<MentionList ref={ref} items={[]} query="协作" command={vi.fn()} />);
+    render(<I18nWrapper><MentionList ref={ref} items={[]} query="协作" command={vi.fn()} /></I18nWrapper>);
 
     expect(
       ref.current?.onKeyDown({ event: new KeyboardEvent("keydown", { key: "Enter" }) }),
     ).toBe(true);
+  });
+
+  it("hides personal agents owned by someone else from a regular member", () => {
+    const qc = fakeQc({
+      members: [
+        { user_id: "u1", name: "Alice", role: "member" },
+        { user_id: "u2", name: "Bob", role: "member" },
+      ],
+      agents: [
+        // Bob's personal agent — Alice (current user) should not see it.
+        {
+          id: "a-personal-bob",
+          name: "Atlas",
+          archived_at: null,
+          visibility: "private",
+          owner_id: "u2",
+        },
+        // Alice's own personal agent — should be visible.
+        {
+          id: "a-personal-alice",
+          name: "Athena",
+          archived_at: null,
+          visibility: "private",
+          owner_id: "u1",
+        },
+        // Workspace agent — visible to everyone.
+        {
+          id: "a-shared",
+          name: "Aether",
+          archived_at: null,
+          visibility: "workspace",
+          owner_id: "u2",
+        },
+      ],
+    });
+    searchIssuesMock.mockReturnValue(new Promise(() => {}));
+
+    const config = createMentionSuggestion(qc);
+    const result = config.items!({ query: "a", editor: {} as never });
+    const items = result as MentionItem[];
+
+    expect(items.some((i) => i.type === "agent" && i.label === "Athena")).toBe(true);
+    expect(items.some((i) => i.type === "agent" && i.label === "Aether")).toBe(true);
+    expect(items.some((i) => i.type === "agent" && i.label === "Atlas")).toBe(false);
+  });
+
+  it("shows everyone's personal agents to a workspace admin", () => {
+    // Role lives in the member fixture, not in authState — promoting Alice
+    // to admin here is enough to flip the gate. Backend gate allows admins
+    // to assign anyone's personal agent, so the @mention list mirrors that.
+    const qc = fakeQc({
+      members: [
+        { user_id: "u1", name: "Alice", role: "admin" },
+        { user_id: "u2", name: "Bob", role: "member" },
+      ],
+      agents: [
+        {
+          id: "a-personal-bob",
+          name: "Atlas",
+          archived_at: null,
+          visibility: "private",
+          owner_id: "u2",
+        },
+      ],
+    });
+    searchIssuesMock.mockReturnValue(new Promise(() => {}));
+
+    const config = createMentionSuggestion(qc);
+    const result = config.items!({ query: "a", editor: {} as never });
+    const items = result as MentionItem[];
+
+    expect(items.some((i) => i.type === "agent" && i.label === "Atlas")).toBe(true);
   });
 
   it("includes cached issues in the synchronous response", () => {

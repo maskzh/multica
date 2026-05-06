@@ -52,6 +52,43 @@ func TestNormalizeServerBaseURL(t *testing.T) {
 	}
 }
 
+func TestNewTaskSlotSemaphoreReturnsStableSlotIndexes(t *testing.T) {
+	t.Parallel()
+
+	sem := newTaskSlotSemaphore(4)
+	seen := make(map[int]bool)
+	for i := 0; i < 4; i++ {
+		select {
+		case slot := <-sem:
+			if slot < 0 || slot > 3 {
+				t.Fatalf("slot out of range: %d", slot)
+			}
+			if seen[slot] {
+				t.Fatalf("duplicate slot: %d", slot)
+			}
+			seen[slot] = true
+		default:
+			t.Fatalf("expected slot %d to be available", i)
+		}
+	}
+
+	select {
+	case slot := <-sem:
+		t.Fatalf("expected semaphore to be empty, got slot %d", slot)
+	default:
+	}
+
+	sem <- 2
+	select {
+	case slot := <-sem:
+		if slot != 2 {
+			t.Fatalf("expected released slot 2, got %d", slot)
+		}
+	default:
+		t.Fatal("expected released slot to be available")
+	}
+}
+
 func TestBuildPromptContainsIssueID(t *testing.T) {
 	t.Parallel()
 
@@ -266,6 +303,197 @@ func TestIsWorkspaceNotFoundError(t *testing.T) {
 	}
 }
 
+func TestIsTaskNotFoundError(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "404 with task not found body",
+			err: &requestError{
+				Method:     http.MethodPost,
+				Path:       "/api/daemon/tasks/abc/messages",
+				StatusCode: http.StatusNotFound,
+				Body:       `{"error":"task not found"}`,
+			},
+			want: true,
+		},
+		{
+			name: "404 with mixed-case body still matches",
+			err: &requestError{
+				StatusCode: http.StatusNotFound,
+				Body:       `{"error":"Task Not Found"}`,
+			},
+			want: true,
+		},
+		{
+			name: "500 with same body is not task-not-found",
+			err: &requestError{
+				StatusCode: http.StatusInternalServerError,
+				Body:       `{"error":"task not found"}`,
+			},
+			want: false,
+		},
+		{
+			name: "404 with workspace-not-found body is not task-not-found",
+			err: &requestError{
+				StatusCode: http.StatusNotFound,
+				Body:       `{"error":"workspace not found"}`,
+			},
+			want: false,
+		},
+		{
+			name: "non-requestError",
+			err:  errors.New("network down"),
+			want: false,
+		},
+		{
+			name: "nil",
+			err:  nil,
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isTaskNotFoundError(tc.err); got != tc.want {
+				t.Fatalf("isTaskNotFoundError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestShouldInterruptAgent(t *testing.T) {
+	t.Parallel()
+
+	notFound := &requestError{
+		StatusCode: http.StatusNotFound,
+		Body:       `{"error":"task not found"}`,
+	}
+	transient := &requestError{
+		StatusCode: http.StatusBadGateway,
+		Body:       `<html>...</html>`,
+	}
+
+	cases := []struct {
+		name   string
+		status string
+		err    error
+		want   bool
+	}{
+		{name: "status cancelled", status: "cancelled", err: nil, want: true},
+		{name: "task deleted (404)", status: "", err: notFound, want: true},
+		{name: "running normally", status: "running", err: nil, want: false},
+		{name: "transient 5xx is not a cancel signal", status: "", err: transient, want: false},
+		{name: "no information yet", status: "", err: nil, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := shouldInterruptAgent(tc.status, tc.err); got != tc.want {
+				t.Fatalf("shouldInterruptAgent(%q, %v) = %v, want %v", tc.status, tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWatchTaskCancellation_TaskDeleted reproduces the zombie-task bug:
+// when the server deletes a task while it is running (issue removed,
+// agent reassigned, etc.), GetTaskStatus starts returning 404. Before the
+// fix the daemon kept polling and never interrupted the running agent —
+// codex would keep emitting tool calls for minutes against a dead task.
+//
+// After the fix, watchTaskCancellation must close its channel within a
+// few poll intervals so the caller can cancel the agent context.
+func TestWatchTaskCancellation_TaskDeleted(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/status") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"task not found"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	d := &Daemon{client: NewClient(srv.URL), logger: slog.Default()}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	cancelled := d.watchTaskCancellation(ctx, "task-deleted", 10*time.Millisecond, slog.Default())
+
+	select {
+	case <-cancelled:
+		// Expected: the watcher detected the 404 and signalled cancellation.
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchTaskCancellation did not signal cancellation when task was deleted (404)")
+	}
+}
+
+// TestWatchTaskCancellation_StatusCancelled keeps the existing behaviour
+// (server transitions task status to "cancelled") working alongside the
+// new 404 path.
+func TestWatchTaskCancellation_StatusCancelled(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/status") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"cancelled"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	d := &Daemon{client: NewClient(srv.URL), logger: slog.Default()}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	cancelled := d.watchTaskCancellation(ctx, "task-cancelled", 10*time.Millisecond, slog.Default())
+
+	select {
+	case <-cancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchTaskCancellation did not signal cancellation when status=cancelled")
+	}
+}
+
+// TestWatchTaskCancellation_RunningTaskNotInterrupted ensures the watcher
+// does NOT trigger on transient errors or while the task is still running.
+func TestWatchTaskCancellation_RunningTaskNotInterrupted(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"running"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	d := &Daemon{client: NewClient(srv.URL), logger: slog.Default()}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	cancelled := d.watchTaskCancellation(ctx, "task-running", 10*time.Millisecond, slog.Default())
+
+	select {
+	case <-cancelled:
+		t.Fatal("watchTaskCancellation should not signal cancellation while task is running")
+	case <-time.After(150 * time.Millisecond):
+	}
+	if calls.Load() < 5 {
+		t.Fatalf("expected the watcher to poll at least 5 times in 150ms, got %d", calls.Load())
+	}
+}
+
 func TestMergeUsage(t *testing.T) {
 	t.Parallel()
 
@@ -331,13 +559,19 @@ func newRepoReadyTestDaemon(t *testing.T, handler http.HandlerFunc) *Daemon {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	return &Daemon{
+	d := &Daemon{
 		client:       NewClient(srv.URL),
 		repoCache:    repocache.New(t.TempDir(), slog.Default()),
 		logger:       slog.Default(),
 		workspaces:   make(map[string]*workspaceState),
 		runtimeIndex: make(map[string]Runtime),
 	}
+	// Drain background syncs (started by registerTaskRepos) before the
+	// t.TempDir cache root is cleaned up, otherwise an in-flight clone/fetch
+	// races against the deletion and the test fails with a misleading
+	// "directory not empty" cleanup error.
+	t.Cleanup(d.waitBackgroundSyncs)
+	return d
 }
 
 func TestExecuteAndDrain_ResumeFailureFallback(t *testing.T) {
@@ -554,7 +788,7 @@ func TestEnsureRepoReadyFastPathDoesNotRefresh(t *testing.T) {
 	if err := d.repoCache.Sync("ws-1", []repocache.RepoInfo{{URL: sourceRepo}}); err != nil {
 		t.Fatalf("seed repo cache: %v", err)
 	}
-	d.workspaces["ws-1"] = newWorkspaceState("ws-1", nil, "v1", []RepoData{{URL: sourceRepo}})
+	d.workspaces["ws-1"] = newWorkspaceState("ws-1", nil, "v1", []RepoData{{URL: sourceRepo}}, nil)
 
 	if err := d.ensureRepoReady(context.Background(), "ws-1", sourceRepo); err != nil {
 		t.Fatalf("ensureRepoReady: %v", err)
@@ -576,7 +810,7 @@ func TestEnsureRepoReadyTrimsURL(t *testing.T) {
 	if err := d.repoCache.Sync("ws-1", []repocache.RepoInfo{{URL: sourceRepo}}); err != nil {
 		t.Fatalf("seed repo cache: %v", err)
 	}
-	d.workspaces["ws-1"] = newWorkspaceState("ws-1", nil, "v1", []RepoData{{URL: sourceRepo}})
+	d.workspaces["ws-1"] = newWorkspaceState("ws-1", nil, "v1", []RepoData{{URL: sourceRepo}}, nil)
 
 	// URL with trailing whitespace should still hit the fast path.
 	if err := d.ensureRepoReady(context.Background(), "ws-1", "  "+sourceRepo+"  "); err != nil {
@@ -600,11 +834,11 @@ func TestEnsureRepoReadyRefreshesOnMiss(t *testing.T) {
 		refreshCalls.Add(1)
 		json.NewEncoder(w).Encode(WorkspaceReposResponse{
 			WorkspaceID:  "ws-1",
-			Repos:        []RepoData{{URL: sourceRepo, Description: "repo"}},
+			Repos:        []RepoData{{URL: sourceRepo}},
 			ReposVersion: "v2",
 		})
 	})
-	d.workspaces["ws-1"] = newWorkspaceState("ws-1", nil, "", nil)
+	d.workspaces["ws-1"] = newWorkspaceState("ws-1", nil, "", nil, nil)
 
 	if err := d.ensureRepoReady(context.Background(), "ws-1", sourceRepo); err != nil {
 		t.Fatalf("ensureRepoReady: %v", err)
@@ -614,6 +848,89 @@ func TestEnsureRepoReadyRefreshesOnMiss(t *testing.T) {
 	}
 	if d.repoCache.Lookup("ws-1", sourceRepo) == "" {
 		t.Fatal("expected repo to be cached after refresh")
+	}
+}
+
+// A project github_repo URL that the workspace itself does not bind must still
+// be allowed for `multica repo checkout` after registerTaskRepos runs. Without
+// this, the new project-repos-override-workspace-repos behavior would surface
+// repos in the meta-skill that the agent then can't actually clone.
+func TestRegisterTaskReposAllowsProjectOnlyURL(t *testing.T) {
+	t.Parallel()
+
+	sourceRepo := createDaemonTestRepo(t)
+	var refreshCalls atomic.Int32
+	d := newRepoReadyTestDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		refreshCalls.Add(1)
+		// If the workspace endpoint is hit it returns an empty list — the
+		// project-only URL must NOT depend on this for allowlist membership.
+		json.NewEncoder(w).Encode(WorkspaceReposResponse{
+			WorkspaceID:  "ws-1",
+			Repos:        []RepoData{},
+			ReposVersion: "v1",
+		})
+	})
+	// Workspace has zero workspace-bound repos; the project resource gives us
+	// the only repo URL the agent should be able to check out.
+	d.workspaces["ws-1"] = newWorkspaceState("ws-1", nil, "", nil, nil)
+
+	d.registerTaskRepos("ws-1", []RepoData{{URL: sourceRepo}})
+
+	// The async clone goroutine in registerTaskRepos may not have finished;
+	// poll briefly until the cache is populated so the test isn't racy.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if d.repoCache.Lookup("ws-1", sourceRepo) != "" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if d.repoCache.Lookup("ws-1", sourceRepo) == "" {
+		t.Fatalf("expected repo to be cached after registerTaskRepos, but Lookup returned empty")
+	}
+
+	if !d.workspaceRepoAllowed("ws-1", sourceRepo) {
+		t.Fatal("expected project repo to pass workspaceRepoAllowed")
+	}
+
+	if err := d.ensureRepoReady(context.Background(), "ws-1", sourceRepo); err != nil {
+		t.Fatalf("ensureRepoReady: %v", err)
+	}
+	if got := refreshCalls.Load(); got != 0 {
+		t.Fatalf("expected zero workspace-repos refreshes (URL came from project), got %d", got)
+	}
+}
+
+// Confirms that a workspace refresh wiping allowedRepoURLs does not also wipe
+// task-scoped URLs (project repos). Without the separate taskRepoURLs map a
+// concurrent refresh would silently revoke project-only URLs and the next
+// checkout would fail.
+func TestRegisterTaskReposSurvivesWorkspaceRefresh(t *testing.T) {
+	t.Parallel()
+
+	sourceRepo := createDaemonTestRepo(t)
+	d := newRepoReadyTestDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(WorkspaceReposResponse{
+			WorkspaceID:  "ws-1",
+			Repos:        []RepoData{},
+			ReposVersion: "v2",
+		})
+	})
+	d.workspaces["ws-1"] = newWorkspaceState("ws-1", nil, "", nil, nil)
+	d.registerTaskRepos("ws-1", []RepoData{{URL: sourceRepo}})
+
+	// Wait for the registration to populate the cache.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && d.repoCache.Lookup("ws-1", sourceRepo) == "" {
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if _, err := d.refreshWorkspaceRepos(context.Background(), "ws-1"); err != nil {
+		t.Fatalf("refreshWorkspaceRepos: %v", err)
+	}
+
+	if !d.workspaceRepoAllowed("ws-1", sourceRepo) {
+		t.Fatal("project repo URL was wiped by workspace refresh")
 	}
 }
 
@@ -627,7 +944,7 @@ func TestEnsureRepoReadyReturnsNotConfigured(t *testing.T) {
 			ReposVersion: "v1",
 		})
 	})
-	d.workspaces["ws-1"] = newWorkspaceState("ws-1", nil, "", nil)
+	d.workspaces["ws-1"] = newWorkspaceState("ws-1", nil, "", nil, nil)
 
 	err := d.ensureRepoReady(context.Background(), "ws-1", "git@example.com:team/api.git")
 	if !errors.Is(err, ErrRepoNotConfigured) {
@@ -642,11 +959,11 @@ func TestEnsureRepoReadyReportsSyncFailure(t *testing.T) {
 	d := newRepoReadyTestDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(WorkspaceReposResponse{
 			WorkspaceID:  "ws-1",
-			Repos:        []RepoData{{URL: missingRepo, Description: "missing"}},
+			Repos:        []RepoData{{URL: missingRepo}},
 			ReposVersion: "v1",
 		})
 	})
-	d.workspaces["ws-1"] = newWorkspaceState("ws-1", nil, "", nil)
+	d.workspaces["ws-1"] = newWorkspaceState("ws-1", nil, "", nil, nil)
 
 	err := d.ensureRepoReady(context.Background(), "ws-1", missingRepo)
 	if err == nil || !strings.Contains(err.Error(), "repo is configured but not synced:") {
@@ -670,11 +987,11 @@ func TestEnsureRepoReadyConcurrentMissRefreshesOnce(t *testing.T) {
 		refreshCalls.Add(1)
 		json.NewEncoder(w).Encode(WorkspaceReposResponse{
 			WorkspaceID:  "ws-1",
-			Repos:        []RepoData{{URL: sourceRepo, Description: "repo"}},
+			Repos:        []RepoData{{URL: sourceRepo}},
 			ReposVersion: "v2",
 		})
 	})
-	d.workspaces["ws-1"] = newWorkspaceState("ws-1", nil, "", nil)
+	d.workspaces["ws-1"] = newWorkspaceState("ws-1", nil, "", nil, nil)
 
 	const concurrency = 8
 	var wg sync.WaitGroup

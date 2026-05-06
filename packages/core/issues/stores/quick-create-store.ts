@@ -15,6 +15,11 @@ import { defaultStorage } from "../../platform/storage";
 interface QuickCreateState {
   lastAgentId: string | null;
   setLastAgentId: (id: string | null) => void;
+  prompt: string;
+  setPrompt: (prompt: string) => void;
+  clearPrompt: () => void;
+  keepOpen: boolean;
+  setKeepOpen: (v: boolean) => void;
 }
 
 export const useQuickCreateStore = create<QuickCreateState>()(
@@ -22,6 +27,11 @@ export const useQuickCreateStore = create<QuickCreateState>()(
     (set) => ({
       lastAgentId: null,
       setLastAgentId: (id) => set({ lastAgentId: id }),
+      prompt: "",
+      setPrompt: (prompt) => set({ prompt }),
+      clearPrompt: () => set({ prompt: "" }),
+      keepOpen: false,
+      setKeepOpen: (v) => set({ keepOpen: v }),
     }),
     {
       name: "multica_quick_create",

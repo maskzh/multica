@@ -51,6 +51,7 @@ export type WSEventType =
   | "chat:message"
   | "chat:done"
   | "chat:session_read"
+  | "chat:session_deleted"
   | "project:created"
   | "project:updated"
   | "project:deleted"
@@ -196,6 +197,22 @@ export interface TaskMessagePayload {
   output?: string;
 }
 
+export interface TaskQueuedPayload {
+  task_id: string;
+  agent_id: string;
+  issue_id: string;
+  chat_session_id?: string;
+  status: string;
+}
+
+export interface TaskDispatchPayload {
+  task_id: string;
+  agent_id: string;
+  issue_id: string;
+  runtime_id: string;
+  chat_session_id?: string;
+}
+
 export interface TaskCompletedPayload {
   task_id: string;
   agent_id: string;
@@ -261,6 +278,10 @@ export interface ChatDonePayload {
 }
 
 export interface ChatSessionReadPayload {
+  chat_session_id: string;
+}
+
+export interface ChatSessionDeletedPayload {
   chat_session_id: string;
 }
 

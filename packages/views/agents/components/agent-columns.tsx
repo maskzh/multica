@@ -7,6 +7,7 @@ import {
   type AgentActivity,
   type AgentPresenceDetail,
   summarizeActivityWindow,
+  VISIBILITY_TOOLTIP,
 } from "@multica/core/agents";
 import {
   Tooltip,
@@ -17,6 +18,7 @@ import { ActorAvatar } from "../../common/actor-avatar";
 import { availabilityConfig, workloadConfig } from "../presence";
 import { AgentRowActions } from "./agent-row-actions";
 import { Sparkline } from "./sparkline";
+import { useT } from "../../i18n";
 
 // Per-row data shape. We assemble agent + runtime + presence + activity +
 // run count into one struct at the page level so the column cells just
@@ -30,6 +32,8 @@ export interface AgentRow {
   // Inline owner avatar — non-null when the page wants to attribute the
   // agent to a teammate (typically All scope on someone else's agent).
   ownerIdToShow: string | null;
+  // True when the current user owns this agent (drives the "You" badge).
+  isOwnedByMe: boolean;
   // True when the current user can archive / cancel-tasks on this agent.
   canManage: boolean;
 }
@@ -38,18 +42,17 @@ export interface AgentRow {
 // column.size doubles as the cell's effective max-width: truncatable
 // cells with `truncate` inside hit ellipsis at the column edge.
 //
-// The Agent column has `meta.grow: true` so DataTable skips its inline
-// `width` — that lets fixed table-layout assign it the leftover space
-// (= container width − sum of other columns), so the table fills the
-// viewport without an empty spacer column.
+// The Agent and Runtime columns have `meta.grow: true` so DataTable skips
+// their inline widths until the user resizes them. Fixed table-layout splits
+// the leftover space between them, which keeps Agent from monopolising wide
+// viewports while still giving both columns a real floor.
 //
-// The Agent column also keeps `size: 240` even though it isn't used for
-// rendering. TanStack folds this into `table.getTotalSize()`, which
-// DataTable applies as the table's `min-width`. That's how the agent
-// column gets a real 240px floor: when the viewport drops below
-// `sum + 240`, the table refuses to shrink further and the container
-// scrolls instead. (Fixed table-layout ignores cell-level min-width
-// per spec, so the floor has to live on the table itself.)
+// The grow columns also keep their `size` values even though those widths
+// are skipped for initial rendering. TanStack folds them into
+// `table.getTotalSize()`, which DataTable applies as the table's `min-width`.
+// That's how the grow columns get real floors: when the viewport drops below
+// the summed column sizes, the table refuses to shrink further and the
+// container scrolls instead.
 const COL_WIDTHS = {
   agent: 240,
   status: 120,
@@ -63,22 +66,32 @@ const COL_WIDTHS = {
   actions: 60,
 } as const;
 
+type ColumnHeaderT = ReturnType<typeof useT<"agents">>["t"];
+
+function makeHeaderRenderer(t: ColumnHeaderT, key: "agent" | "status" | "workload" | "runtime" | "activity_7d" | "runs") {
+  return key === "runs"
+    ? () => <div className="text-right">{t(($) => $.columns.runs)}</div>
+    : () => t(($) => $.columns[key]);
+}
+
 export function createAgentColumns({
   onDuplicate,
+  t,
 }: {
   onDuplicate: (agent: Agent) => void;
+  t: ColumnHeaderT;
 }): ColumnDef<AgentRow>[] {
   return [
     {
       id: "agent",
-      header: "Agent",
+      header: makeHeaderRenderer(t, "agent"),
       size: COL_WIDTHS.agent,
       meta: { grow: true },
       cell: ({ row }) => <AgentNameCell row={row.original} />,
     },
     {
       id: "status",
-      header: "Status",
+      header: makeHeaderRenderer(t, "status"),
       size: COL_WIDTHS.status,
       cell: ({ row }) => {
         if (row.original.agent.archived_at) {
@@ -89,7 +102,7 @@ export function createAgentColumns({
     },
     {
       id: "workload",
-      header: "Workload",
+      header: makeHeaderRenderer(t, "workload"),
       size: COL_WIDTHS.workload,
       cell: ({ row }) => {
         if (row.original.agent.archived_at) {
@@ -100,19 +113,20 @@ export function createAgentColumns({
     },
     {
       id: "runtime",
-      header: "Runtime",
+      header: makeHeaderRenderer(t, "runtime"),
       size: COL_WIDTHS.runtime,
+      meta: { grow: true },
       cell: ({ row }) => <RuntimeCell row={row.original} />,
     },
     {
       id: "activity",
-      header: "Activity (7d)",
+      header: makeHeaderRenderer(t, "activity_7d"),
       size: COL_WIDTHS.activity,
       cell: ({ row }) => <ActivityCell row={row.original} />,
     },
     {
       id: "runs",
-      header: () => <div className="text-right">Runs</div>,
+      header: makeHeaderRenderer(t, "runs"),
       size: COL_WIDTHS.runs,
       cell: ({ row }) => (
         <div className="text-right font-mono text-xs tabular-nums text-muted-foreground">
@@ -126,6 +140,7 @@ export function createAgentColumns({
       id: "actions",
       header: () => null,
       size: COL_WIDTHS.actions,
+      enableResizing: false,
       cell: ({ row }) => (
         <div
           className="flex justify-end"
@@ -150,7 +165,8 @@ export function createAgentColumns({
 // ---------------------------------------------------------------------------
 
 function AgentNameCell({ row }: { row: AgentRow }) {
-  const { agent, ownerIdToShow } = row;
+  const { t } = useT("agents");
+  const { agent, ownerIdToShow, isOwnedByMe } = row;
   const isArchived = !!agent.archived_at;
   const isPrivate = agent.visibility === "private";
 
@@ -180,9 +196,14 @@ function AgentNameCell({ row }: { row: AgentRow }) {
                 }
               />
               <TooltipContent>
-                Private — only the owner can assign work
+                {VISIBILITY_TOOLTIP.private}
               </TooltipContent>
             </Tooltip>
+          )}
+          {isOwnedByMe && !ownerIdToShow && (
+            <span className="shrink-0 rounded bg-muted px-1 text-[10px] font-medium text-muted-foreground">
+              {t(($) => $.row.you)}
+            </span>
           )}
           {ownerIdToShow && (
             <ActorAvatar
@@ -193,7 +214,7 @@ function AgentNameCell({ row }: { row: AgentRow }) {
           )}
           {isArchived && (
             <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-              Archived
+              {t(($) => $.row.archived)}
             </span>
           )}
         </div>
@@ -204,7 +225,7 @@ function AgentNameCell({ row }: { row: AgentRow }) {
               : "italic text-muted-foreground/50"
           }`}
         >
-          {agent.description || "No description"}
+          {agent.description || t(($) => $.row.no_description)}
         </div>
       </div>
     </div>
@@ -216,6 +237,7 @@ function AvailabilityCell({
 }: {
   presence: AgentPresenceDetail | null | undefined;
 }) {
+  const { t } = useT("agents");
   if (!presence) {
     return (
       <span className="inline-flex h-3 w-16 animate-pulse rounded bg-muted/60" />
@@ -225,7 +247,7 @@ function AvailabilityCell({
   return (
     <span className="inline-flex items-center gap-1.5">
       <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${av.dotClass}`} />
-      <span className={`text-xs ${av.textClass}`}>{av.label}</span>
+      <span className={`text-xs ${av.textClass}`}>{t(($) => $.availability[presence.availability])}</span>
     </span>
   );
 }
@@ -235,6 +257,7 @@ function WorkloadCell({
 }: {
   presence: AgentPresenceDetail | null | undefined;
 }) {
+  const { t } = useT("agents");
   if (!presence) {
     return (
       <span className="inline-flex h-3 w-20 animate-pulse rounded bg-muted/60" />
@@ -277,7 +300,7 @@ function WorkloadCell({
           className={`h-3 w-3 shrink-0 ${labelTone} ${isWorking ? "animate-spin" : ""}`}
         />
       )}
-      <span className={`shrink-0 ${labelTone}`}>{wl.label}</span>
+      <span className={`shrink-0 ${labelTone}`}>{t(($) => $.workload[presence.workload])}</span>
       {counts && (
         <span className="truncate text-muted-foreground">{counts}</span>
       )}
@@ -286,10 +309,11 @@ function WorkloadCell({
 }
 
 function RuntimeCell({ row }: { row: AgentRow }) {
+  const { t } = useT("agents");
   const { agent, runtime } = row;
   const isCloud = agent.runtime_mode === "cloud";
   const RuntimeIcon = isCloud ? Cloud : Monitor;
-  const runtimeLabel = runtime?.name ?? (isCloud ? "Cloud" : "Local");
+  const runtimeLabel = runtime?.name ?? (isCloud ? t(($) => $.row.fallback_runtime_cloud) : t(($) => $.row.fallback_runtime_local));
 
   return (
     <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
@@ -337,24 +361,31 @@ function ActivityCell({ row }: { row: AgentRow }) {
 }
 
 function ActivityTooltipBody({ activity }: { activity: AgentActivity }) {
+  const { t } = useT("agents");
   const summary = summarizeActivityWindow(activity, 7);
   const { totalRuns, totalFailed } = summary;
   const { daysSinceCreated } = activity;
 
   const isPartial = daysSinceCreated < 7;
   const headerText = isPartial
-    ? `Created ${daysSinceCreated === 0 ? "today" : `${daysSinceCreated} day${daysSinceCreated === 1 ? "" : "s"} ago`}`
-    : "Last 7 days";
+    ? daysSinceCreated === 0
+      ? t(($) => $.activity_tooltip.created_today)
+      : t(($) => $.activity_tooltip.created_days_ago, { count: daysSinceCreated })
+    : t(($) => $.activity_tooltip.last_7_days);
 
   let bodyText: string;
   if (totalRuns === 0) {
-    bodyText = "No activity";
+    bodyText = t(($) => $.activity_tooltip.no_activity);
   } else {
+    const runsText = t(($) => $.activity_tooltip.runs, { count: totalRuns });
     const failedFragment =
       totalFailed > 0
-        ? ` · ${totalFailed} failed (${Math.round((totalFailed / totalRuns) * 100)}%)`
+        ? t(($) => $.activity_tooltip.failed_suffix, {
+            count: totalFailed,
+            percent: Math.round((totalFailed / totalRuns) * 100),
+          })
         : "";
-    bodyText = `${totalRuns} run${totalRuns === 1 ? "" : "s"}${failedFragment}`;
+    bodyText = `${runsText}${failedFragment}`;
   }
 
   return (

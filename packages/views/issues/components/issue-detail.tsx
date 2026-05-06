@@ -1,14 +1,16 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useDefaultLayout, usePanelRef } from "react-resizable-panels";
 import { AppLink } from "../../navigation";
 import { useNavigation } from "../../navigation";
 import {
+  Archive,
   Calendar,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  CircleCheck,
   MoreHorizontal,
   PanelRight,
   Pin,
@@ -63,6 +65,7 @@ import { timeAgo } from "@multica/core/utils";
 import { cn } from "@multica/ui/lib/utils";
 
 import { ProgressRing } from "./progress-ring";
+import { useT } from "../../i18n";
 
 function shortDate(date: string | null): string {
   if (!date) return "—";
@@ -72,49 +75,67 @@ function shortDate(date: string | null): string {
   });
 }
 
-function statusLabel(status: string): string {
-  return STATUS_CONFIG[status as IssueStatus]?.label ?? status;
+type ActivityT = ReturnType<typeof useT<"issues">>["t"];
+
+function statusLabel(status: string, t: ActivityT): string {
+  if (status in STATUS_CONFIG) {
+    return t(($) => $.status[status as IssueStatus]);
+  }
+  return status;
 }
 
-function priorityLabel(priority: string): string {
-  return PRIORITY_CONFIG[priority as IssuePriority]?.label ?? priority;
+function priorityLabel(priority: string, t: ActivityT): string {
+  if (priority in PRIORITY_CONFIG) {
+    return t(($) => $.priority[priority as IssuePriority]);
+  }
+  return priority;
 }
 
 function formatActivity(
   entry: TimelineEntry,
+  t: ActivityT,
   resolveActorName?: (type: string, id: string) => string,
 ): string {
   const details = (entry.details ?? {}) as Record<string, string>;
   switch (entry.action) {
     case "created":
-      return "created this issue";
+      return t(($) => $.activity.created);
     case "status_changed":
-      return `changed status from ${statusLabel(details.from ?? "?")} to ${statusLabel(details.to ?? "?")}`;
+      return t(($) => $.activity.status_changed, {
+        from: statusLabel(details.from ?? "?", t),
+        to: statusLabel(details.to ?? "?", t),
+      });
     case "priority_changed":
-      return `changed priority from ${priorityLabel(details.from ?? "?")} to ${priorityLabel(details.to ?? "?")}`;
+      return t(($) => $.activity.priority_changed, {
+        from: priorityLabel(details.from ?? "?", t),
+        to: priorityLabel(details.to ?? "?", t),
+      });
     case "assignee_changed": {
       const isSelfAssign = details.to_type === entry.actor_type && details.to_id === entry.actor_id;
-      if (isSelfAssign) return "self-assigned this issue";
+      if (isSelfAssign) return t(($) => $.activity.self_assigned);
       const toName = details.to_id && details.to_type && resolveActorName
         ? resolveActorName(details.to_type, details.to_id)
         : null;
-      if (toName) return `assigned to ${toName}`;
-      if (details.from_id && !details.to_id) return "removed assignee";
-      return "changed assignee";
+      if (toName) return t(($) => $.activity.assigned_to, { name: toName });
+      if (details.from_id && !details.to_id) return t(($) => $.activity.removed_assignee);
+      return t(($) => $.activity.changed_assignee);
     }
     case "due_date_changed": {
-      if (!details.to) return "removed due date";
+      if (!details.to) return t(($) => $.activity.due_date_removed);
       const formatted = new Date(details.to).toLocaleDateString("en-US", { month: "short", day: "numeric" });
-      return `set due date to ${formatted}`;
+      return t(($) => $.activity.due_date_set, { date: formatted });
     }
     case "title_changed":
-      return `renamed this issue from "${details.from ?? "?"}" to "${details.to ?? "?"}"`;
+      return t(($) => $.activity.title_renamed, {
+        from: details.from ?? "?",
+        to: details.to ?? "?",
+      });
     case "description_updated":
-      return "updated the description";
+      return t(($) => $.activity.description_updated);
     case "task_completed":
-      return "completed the task";
+      return t(($) => $.activity.task_completed, { count: entry.coalesced_count ?? 1 });
     case "task_failed":
-      return "task failed";
+      return t(($) => $.activity.task_failed, { count: entry.coalesced_count ?? 1 });
     default:
       return entry.action ?? "";
   }
@@ -131,6 +152,23 @@ function formatTokenCount(n: number): string {
   return String(n);
 }
 
+function TimelineSkeleton() {
+  return (
+    <div className="mt-4 flex flex-col gap-3">
+      {[0, 1].map((i) => (
+        <div key={i} className="flex gap-3 p-4">
+          <Skeleton className="h-10 w-10 shrink-0 rounded-full" />
+          <div className="flex-1 space-y-2">
+            <Skeleton className="h-4 w-32" />
+            <Skeleton className="h-4 w-full" />
+            <Skeleton className="h-4 w-4/5" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Props
 // ---------------------------------------------------------------------------
@@ -138,6 +176,8 @@ function formatTokenCount(n: number): string {
 interface IssueDetailProps {
   issueId: string;
   onDelete?: () => void;
+  /** Called after the issue is marked as done via the toolbar button. */
+  onDone?: () => void;
   defaultSidebarOpen?: boolean;
   layoutId?: string;
   /** When set, the issue detail will auto-scroll to this comment and briefly highlight it. */
@@ -148,7 +188,8 @@ interface IssueDetailProps {
 // IssueDetail
 // ---------------------------------------------------------------------------
 
-export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layoutId = "multica_issue_detail_layout", highlightCommentId }: IssueDetailProps) {
+export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = true, layoutId = "multica_issue_detail_layout", highlightCommentId }: IssueDetailProps) {
+  const { t } = useT("issues");
   const id = issueId;
   const router = useNavigation();
   const user = useAuthStore((s) => s.user);
@@ -159,6 +200,13 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
   const wsId = useWorkspaceId();
   const { data: members = [] } = useQuery(memberListOptions(wsId));
   const { data: agents = [] } = useQuery(agentListOptions(wsId));
+  // Workspace owners and admins moderate any comment authored by anyone
+  // (mirrors backend `comment.go:507-512`). Computed here so per-comment
+  // rendering doesn't have to re-derive it for every row.
+  const currentUserRole =
+    members.find((m) => m.user_id === user?.id)?.role ?? null;
+  const canModerateComments =
+    currentUserRole === "owner" || currentUserRole === "admin";
   const { data: allIssues = [] } = useQuery(issueListOptions(wsId));
   const { getActorName } = useActorName();
   const { uploadWithToast } = useFileUpload(api);
@@ -167,14 +215,15 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
   });
   const sidebarRef = usePanelRef();
   const isMobile = useIsMobile();
-  const [sidebarOpen, setSidebarOpen] = useState(defaultSidebarOpen);
+  const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(defaultSidebarOpen);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   useEffect(() => {
     if (isMobile) {
-      setSidebarOpen(false);
-      sidebarRef.current?.collapse();
+      setMobileSidebarOpen(false);
     }
   }, [isMobile]);
+  const sidebarOpen = isMobile ? mobileSidebarOpen : desktopSidebarOpen;
   const [propertiesOpen, setPropertiesOpen] = useState(true);
   const [detailsOpen, setDetailsOpen] = useState(true);
   const [parentIssueOpen, setParentIssueOpen] = useState(true);
@@ -228,9 +277,71 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
 
   // Custom hooks — encapsulate timeline, reactions, subscribers
   const {
-    timeline, submitComment, submitReply,
+    timeline, loading: timelineLoading,
+    submitComment, submitReply,
     editComment, deleteComment, toggleReaction: handleToggleReaction,
-  } = useIssueTimeline(id, user?.id);
+    hasMoreOlder, hasMoreNewer,
+    isFetchingOlder, isFetchingNewer,
+    fetchOlder, fetchNewer, jumpToLatest,
+    isAtLatest, newEntriesBelowCount,
+  } = useIssueTimeline(id, user?.id, { around: highlightCommentId ?? null });
+
+  // Memoized timeline grouping. The same Map / groups references are reused
+  // across re-renders that don't change `timeline`, so React.memo on
+  // CommentCard can skip re-rendering when the only thing that moved was
+  // unrelated parent state (e.g. composer draft, sidebar toggle).
+  const timelineView = useMemo(() => {
+    const topLevel = timeline.filter((e) => e.type === "activity" || !e.parent_id);
+    const repliesByParent = new Map<string, TimelineEntry[]>();
+    for (const e of timeline) {
+      if (e.type === "comment" && e.parent_id) {
+        const list = repliesByParent.get(e.parent_id) ?? [];
+        list.push(e);
+        repliesByParent.set(e.parent_id, list);
+      }
+    }
+
+    // Coalesce consecutive activities from the same actor + action.
+    // - task_completed / task_failed: no time limit (these repeat across runs)
+    // - all other actions: within a 2-minute window
+    const COALESCE_MS = 2 * 60 * 1000;
+    const NO_TIME_LIMIT_ACTIONS = new Set(["task_completed", "task_failed"]);
+    const coalesced: TimelineEntry[] = [];
+    for (const entry of topLevel) {
+      if (entry.type === "activity") {
+        const prev = coalesced[coalesced.length - 1];
+        if (
+          prev?.type === "activity" &&
+          prev.action === entry.action &&
+          prev.actor_type === entry.actor_type &&
+          prev.actor_id === entry.actor_id &&
+          (NO_TIME_LIMIT_ACTIONS.has(entry.action!) ||
+            Math.abs(new Date(entry.created_at).getTime() - new Date(prev.created_at).getTime()) <= COALESCE_MS)
+        ) {
+          coalesced[coalesced.length - 1] = { ...entry, coalesced_count: (prev.coalesced_count ?? 1) + 1 };
+          continue;
+        }
+      }
+      coalesced.push(entry);
+    }
+
+    // Group consecutive activities together so the connector line works
+    const groups: { type: "activities" | "comment"; entries: TimelineEntry[] }[] = [];
+    for (const entry of coalesced) {
+      if (entry.type === "activity") {
+        const last = groups[groups.length - 1];
+        if (last?.type === "activities") {
+          last.entries.push(entry);
+        } else {
+          groups.push({ type: "activities", entries: [entry] });
+        }
+      } else {
+        groups.push({ type: "comment", entries: [entry] });
+      }
+    }
+
+    return { repliesByParent, groups };
+  }, [timeline]);
 
   const {
     reactions: issueReactions,
@@ -273,7 +384,7 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
     if (el) {
       didHighlightRef.current = highlightCommentId;
       requestAnimationFrame(() => {
-        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.scrollIntoView({ behavior: "instant", block: "center" });
         setHighlightedId(highlightCommentId);
         const timer = setTimeout(() => setHighlightedId(null), 2000);
         return () => clearTimeout(timer);
@@ -296,6 +407,18 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
   // Called before the `if (!issue)` early return so hook order stays stable.
   const actions = useIssueActions(issue);
   const handleUpdateField = actions.updateField;
+
+  const handleToggleSidebar = useCallback(() => {
+    if (isMobile) {
+      setMobileSidebarOpen((open) => !open);
+      return;
+    }
+
+    const panel = sidebarRef.current;
+    if (!panel) return;
+    if (panel.isCollapsed()) panel.expand();
+    else panel.collapse();
+  }, [isMobile, sidebarRef]);
 
   if (loading) {
     return (
@@ -350,11 +473,11 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
   if (!issue) {
     return (
       <div className="flex flex-1 min-h-0 flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
-        <p>This issue does not exist or has been deleted in this workspace.</p>
+        <p>{t(($) => $.detail.not_found)}</p>
         {!onDelete && (
           <Button variant="outline" size="sm" onClick={() => router.push(paths.issues())}>
             <ChevronLeft className="mr-1 h-3.5 w-3.5" />
-            Back to Issues
+            {t(($) => $.detail.back_to_issues)}
           </Button>
         )}
       </div>
@@ -369,26 +492,26 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
           className={`flex w-full items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors mb-2 hover:bg-accent/70 ${propertiesOpen ? "" : "text-muted-foreground hover:text-foreground"}`}
           onClick={() => setPropertiesOpen(!propertiesOpen)}
         >
-          Properties
+          {t(($) => $.detail.section_properties)}
           <ChevronRight className={`!size-3 shrink-0 stroke-[2.5] text-muted-foreground transition-transform ${propertiesOpen ? "rotate-90" : ""}`} />
         </button>
-        {propertiesOpen && <div className="space-y-0.5 pl-2">
-          <PropRow label="Status">
+        {propertiesOpen && <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 pl-2">
+          <PropRow label={t(($) => $.detail.prop_status)}>
             <StatusPicker status={issue.status} onUpdate={handleUpdateField} align="start" />
           </PropRow>
-          <PropRow label="Priority">
+          <PropRow label={t(($) => $.detail.prop_priority)}>
             <PriorityPicker priority={issue.priority} onUpdate={handleUpdateField} align="start" />
           </PropRow>
-          <PropRow label="Assignee">
+          <PropRow label={t(($) => $.detail.prop_assignee)}>
             <AssigneePicker assigneeType={issue.assignee_type} assigneeId={issue.assignee_id} onUpdate={handleUpdateField} align="start" />
           </PropRow>
-          <PropRow label="Due date">
+          <PropRow label={t(($) => $.detail.prop_due_date)}>
             <DueDatePicker dueDate={issue.due_date} onUpdate={handleUpdateField} />
           </PropRow>
-          <PropRow label="Project">
+          <PropRow label={t(($) => $.detail.prop_project)}>
             <ProjectPicker projectId={issue.project_id} onUpdate={handleUpdateField} />
           </PropRow>
-          <PropRow label="Labels">
+          <PropRow label={t(($) => $.detail.prop_labels)}>
             <LabelPicker issueId={issue.id} align="start" />
           </PropRow>
         </div>}
@@ -401,7 +524,7 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
             className={`flex w-full items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors mb-2 hover:bg-accent/70 ${parentIssueOpen ? "" : "text-muted-foreground hover:text-foreground"}`}
             onClick={() => setParentIssueOpen(!parentIssueOpen)}
           >
-            Parent issue
+            {t(($) => $.detail.section_parent_issue)}
             <ChevronRight className={`!size-3 shrink-0 stroke-[2.5] text-muted-foreground transition-transform ${parentIssueOpen ? "rotate-90" : ""}`} />
           </button>
           {parentIssueOpen && <div className="pl-2">
@@ -423,18 +546,18 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
           className={`flex w-full items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors mb-2 hover:bg-accent/70 ${detailsOpen ? "" : "text-muted-foreground hover:text-foreground"}`}
           onClick={() => setDetailsOpen(!detailsOpen)}
         >
-          Details
+          {t(($) => $.detail.section_details)}
           <ChevronRight className={`!size-3 shrink-0 stroke-[2.5] text-muted-foreground transition-transform ${detailsOpen ? "rotate-90" : ""}`} />
         </button>
-        {detailsOpen && <div className="space-y-0.5 pl-2">
-          <PropRow label="Created by">
+        {detailsOpen && <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 pl-2">
+          <PropRow label={t(($) => $.detail.prop_created_by)}>
             <ActorAvatar actorType={issue.creator_type} actorId={issue.creator_id} size={18} enableHoverCard />
             <span className="cursor-pointer truncate">{getActorName(issue.creator_type, issue.creator_id)}</span>
           </PropRow>
-          <PropRow label="Created">
+          <PropRow label={t(($) => $.detail.prop_created)}>
             <span className="text-muted-foreground">{shortDate(issue.created_at)}</span>
           </PropRow>
-          <PropRow label="Updated">
+          <PropRow label={t(($) => $.detail.prop_updated)}>
             <span className="text-muted-foreground">{shortDate(issue.updated_at)}</span>
           </PropRow>
         </div>}
@@ -452,24 +575,27 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
             className={`flex w-full items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors mb-2 hover:bg-accent/70 ${tokenUsageOpen ? "" : "text-muted-foreground hover:text-foreground"}`}
             onClick={() => setTokenUsageOpen(!tokenUsageOpen)}
           >
-            Token usage
+            {t(($) => $.detail.section_token_usage)}
             <ChevronRight className={`!size-3 shrink-0 stroke-[2.5] text-muted-foreground transition-transform ${tokenUsageOpen ? "rotate-90" : ""}`} />
           </button>
-          {tokenUsageOpen && <div className="space-y-0.5 pl-2">
-            <PropRow label="Input">
+          {tokenUsageOpen && <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 pl-2">
+            <PropRow label={t(($) => $.detail.prop_input)}>
               <span className="text-muted-foreground">{formatTokenCount(usage.total_input_tokens)}</span>
             </PropRow>
-            <PropRow label="Output">
+            <PropRow label={t(($) => $.detail.prop_output)}>
               <span className="text-muted-foreground">{formatTokenCount(usage.total_output_tokens)}</span>
             </PropRow>
             {(usage.total_cache_read_tokens > 0 || usage.total_cache_write_tokens > 0) && (
-              <PropRow label="Cache">
+              <PropRow label={t(($) => $.detail.prop_cache)}>
                 <span className="text-muted-foreground">
-                  {formatTokenCount(usage.total_cache_read_tokens)} read / {formatTokenCount(usage.total_cache_write_tokens)} write
+                  {t(($) => $.detail.prop_cache_value, {
+                    read: formatTokenCount(usage.total_cache_read_tokens),
+                    write: formatTokenCount(usage.total_cache_write_tokens),
+                  })}
                 </span>
               </PropRow>
             )}
-            <PropRow label="Runs">
+            <PropRow label={t(($) => $.detail.prop_runs)}>
               <span className="text-muted-foreground">{usage.task_count}</span>
             </PropRow>
           </div>}
@@ -478,10 +604,8 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
     </div>
   );
 
-  return (
-    <ResizablePanelGroup orientation="horizontal" className="flex-1 min-h-0" defaultLayout={defaultLayout} onLayoutChanged={onLayoutChanged}>
-      <ResizablePanel id="content" minSize="50%">
-      <div className="flex h-full flex-col">
+  const detailContent = (
+    <div className="flex h-full min-w-0 flex-1 flex-col">
         <PageHeader className="gap-2 bg-background text-sm">
           <div className="flex flex-1 items-center gap-1.5 min-w-0">
             {workspace && (
@@ -506,14 +630,45 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
                 <ChevronRight className="h-3 w-3 text-muted-foreground/50 shrink-0" />
               </>
             )}
-            <span className="shrink-0 text-muted-foreground">
-              {issue.identifier}
-            </span>
             <span className="truncate font-medium text-foreground">
               {issue.title}
             </span>
           </div>
           <div className="flex items-center gap-1 shrink-0">
+            {onDone && issue.status !== "done" && issue.status !== "cancelled" && (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="text-muted-foreground"
+                      onClick={() => { handleUpdateField({ status: "done" }); onDone?.(); }}
+                    >
+                      <CircleCheck />
+                    </Button>
+                  }
+                />
+                <TooltipContent side="bottom">{t(($) => $.detail.mark_done_tooltip)}</TooltipContent>
+              </Tooltip>
+            )}
+            {onDone && issue.status === "done" && (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="text-muted-foreground"
+                      onClick={() => { onDone(); }}
+                    >
+                      <Archive />
+                    </Button>
+                  }
+                />
+                <TooltipContent side="bottom">{t(($) => $.detail.archive_tooltip)}</TooltipContent>
+              </Tooltip>
+            )}
             <Tooltip>
               <TooltipTrigger
                 render={
@@ -527,7 +682,7 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
                   </Button>
                 }
               />
-              <TooltipContent side="bottom">{actions.isPinned ? "Unpin from sidebar" : "Pin to sidebar"}</TooltipContent>
+              <TooltipContent side="bottom">{actions.isPinned ? t(($) => $.detail.unpin_tooltip) : t(($) => $.detail.pin_tooltip)}</TooltipContent>
             </Tooltip>
             <IssueActionsDropdown
               issue={issue}
@@ -548,22 +703,13 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
                     variant={sidebarOpen ? "secondary" : "ghost"}
                     size="icon-sm"
                     className={sidebarOpen ? "" : "text-muted-foreground"}
-                    onClick={() => {
-                      if (isMobile) {
-                        setSidebarOpen(!sidebarOpen);
-                      } else {
-                        const panel = sidebarRef.current;
-                        if (!panel) return;
-                        if (panel.isCollapsed()) panel.expand();
-                        else panel.collapse();
-                      }
-                    }}
+                    onClick={handleToggleSidebar}
                   >
                     <PanelRight />
                   </Button>
                 }
               />
-              <TooltipContent side="bottom">Toggle sidebar</TooltipContent>
+              <TooltipContent side="bottom">{t(($) => $.detail.sidebar_tooltip)}</TooltipContent>
             </Tooltip>
           </div>
         </PageHeader>
@@ -574,7 +720,7 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
           <TitleEditor
             key={`title-${id}`}
             defaultValue={issue.title}
-            placeholder="Issue title"
+            placeholder={t(($) => $.detail.title_placeholder)}
             className="w-full text-2xl font-bold leading-snug tracking-tight"
             onBlur={(value) => {
               const trimmed = value.trim();
@@ -587,7 +733,7 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
               href={paths.issueDetail(parentIssue.id)}
               className="mt-2 inline-flex max-w-full items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors group/parent"
             >
-              <span className="font-medium shrink-0">Sub-issue of</span>
+              <span className="font-medium shrink-0">{t(($) => $.detail.sub_issue_of)}</span>
               <StatusIcon status={parentIssue.status} className="h-3.5 w-3.5 shrink-0" />
               <span className="tabular-nums shrink-0">{parentIssue.identifier}</span>
               <span className="truncate group-hover/parent:text-foreground">
@@ -612,7 +758,7 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
               ref={descEditorRef}
               key={id}
               defaultValue={issue.description || ""}
-              placeholder="Add description..."
+              placeholder={t(($) => $.detail.desc_placeholder)}
               onUpdate={(md) => handleUpdateField({ description: md })}
               onUploadFile={handleDescriptionUpload}
               debounceMs={1500}
@@ -648,7 +794,7 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
                 }
               >
                 <Plus className="h-3.5 w-3.5" />
-                <span>Add sub-issues</span>
+                <span>{t(($) => $.detail.add_sub_issues)}</span>
               </button>
             </div>
           )}
@@ -669,7 +815,7 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
                         subIssuesCollapsed && "-rotate-90",
                       )}
                     />
-                    <span>Sub-issues</span>
+                    <span>{t(($) => $.detail.sub_issues_label)}</span>
                   </button>
                   <div className="inline-flex items-center gap-1.5 rounded-full bg-muted/60 px-2 py-0.5">
                     <ProgressRing done={doneCount} total={childIssues.length} size={11} />
@@ -689,13 +835,13 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
                               parent_issue_identifier: issue.identifier,
                             })
                           }
-                          aria-label="Add sub-issue"
+                          aria-label={t(($) => $.detail.add_sub_issue_aria)}
                         >
                           <Plus className="h-4 w-4" />
                         </button>
                       }
                     />
-                    <TooltipContent side="bottom">Add sub-issue</TooltipContent>
+                    <TooltipContent side="bottom">{t(($) => $.detail.add_sub_issue_tooltip)}</TooltipContent>
                   </Tooltip>
                 </div>
 
@@ -757,14 +903,14 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
           <div>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <h2 className="text-base font-semibold">Activity</h2>
+                <h2 className="text-base font-semibold">{t(($) => $.detail.activity_section)}</h2>
               </div>
               <div className="flex items-center gap-2">
                 <button
                   onClick={handleToggleSubscribe}
                   className="text-xs text-muted-foreground hover:text-foreground transition-colors"
                 >
-                  {isSubscribed ? "Unsubscribe" : "Subscribe"}
+                  {isSubscribed ? t(($) => $.detail.unsubscribe) : t(($) => $.detail.subscribe)}
                 </button>
                 <Popover>
                   <PopoverTrigger className="cursor-pointer hover:opacity-80 transition-opacity">
@@ -791,11 +937,11 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
                   </PopoverTrigger>
                   <PopoverContent align="end" className="w-64 p-0">
                     <Command>
-                      <CommandInput placeholder="Change subscribers..." />
+                      <CommandInput placeholder={t(($) => $.detail.change_subscribers_placeholder)} />
                       <CommandList className="max-h-64">
-                        <CommandEmpty>No results found</CommandEmpty>
+                        <CommandEmpty>{t(($) => $.detail.no_subscribers_results)}</CommandEmpty>
                         {members.length > 0 && (
-                          <CommandGroup heading="Members">
+                          <CommandGroup heading={t(($) => $.detail.members_group)}>
                             {members.filter((m, i, arr) => arr.findIndex((x) => x.user_id === m.user_id) === i).map((m) => {
                               const sub = subscribers.find((s) => s.user_type === "member" && s.user_id === m.user_id);
                               const isSubbed = !!sub;
@@ -815,7 +961,7 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
                           </CommandGroup>
                         )}
                         {agents.filter((a) => !a.archived_at).length > 0 && (
-                          <CommandGroup heading="Agents">
+                          <CommandGroup heading={t(($) => $.detail.agents_group)}>
                             {agents.filter((a) => !a.archived_at).map((a) => {
                               const sub = subscribers.find((s) => s.user_type === "agent" && s.user_id === a.id);
                               const isSubbed = !!sub;
@@ -850,122 +996,123 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
             <AgentLiveCard key={id} issueId={id} />
 
             {/* Timeline entries */}
+            {timelineLoading && timelineView.groups.length === 0 ? (
+              <TimelineSkeleton />
+            ) : (
+            <>
+            {hasMoreOlder && (
+              <div className="my-4 flex items-center gap-3">
+                <div className="h-px flex-1 bg-border" />
+                <button
+                  onClick={fetchOlder}
+                  disabled={isFetchingOlder}
+                  className="text-xs text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+                >
+                  {isFetchingOlder
+                    ? t(($) => $.timeline.loading)
+                    : t(($) => $.timeline.show_older)}
+                </button>
+                <div className="h-px flex-1 bg-border" />
+              </div>
+            )}
             <div className="mt-4 flex flex-col gap-3">
-              {(() => {
-                const topLevel = timeline.filter((e) => e.type === "activity" || !e.parent_id);
-                const repliesByParent = new Map<string, TimelineEntry[]>();
-                for (const e of timeline) {
-                  if (e.type === "comment" && e.parent_id) {
-                    const list = repliesByParent.get(e.parent_id) ?? [];
-                    list.push(e);
-                    repliesByParent.set(e.parent_id, list);
-                  }
-                }
-
-                // Coalesce: same actor + same action within 2 min → keep last only
-                const COALESCE_MS = 2 * 60 * 1000;
-                const coalesced: TimelineEntry[] = [];
-                for (const entry of topLevel) {
-                  if (entry.type === "activity") {
-                    const prev = coalesced[coalesced.length - 1];
-                    if (
-                      prev?.type === "activity" &&
-                      prev.action === entry.action &&
-                      prev.actor_type === entry.actor_type &&
-                      prev.actor_id === entry.actor_id &&
-                      Math.abs(new Date(entry.created_at).getTime() - new Date(prev.created_at).getTime()) <= COALESCE_MS
-                    ) {
-                      // Replace previous with this one (keep the later result)
-                      coalesced[coalesced.length - 1] = entry;
-                      continue;
-                    }
-                  }
-                  coalesced.push(entry);
-                }
-
-                // Group consecutive activities together so the connector line works
-                const groups: { type: "activities" | "comment"; entries: TimelineEntry[] }[] = [];
-                for (const entry of coalesced) {
-                  if (entry.type === "activity") {
-                    const last = groups[groups.length - 1];
-                    if (last?.type === "activities") {
-                      last.entries.push(entry);
-                    } else {
-                      groups.push({ type: "activities", entries: [entry] });
-                    }
-                  } else {
-                    groups.push({ type: "comment", entries: [entry] });
-                  }
-                }
-
-                return groups.map((group) => {
-                  if (group.type === "comment") {
-                    const entry = group.entries[0]!;
-                    return (
-                      <div key={entry.id} id={`comment-${entry.id}`}>
-                        <CommentCard
-                          issueId={id}
-                          entry={entry}
-                          allReplies={repliesByParent}
-                          currentUserId={user?.id}
-                          onReply={submitReply}
-                          onEdit={editComment}
-                          onDelete={deleteComment}
-                          onToggleReaction={handleToggleReaction}
-                          highlightedCommentId={highlightedId}
-                        />
-                      </div>
-                    );
-                  }
-
+              {timelineView.groups.map((group) => {
+                if (group.type === "comment") {
+                  const entry = group.entries[0]!;
                   return (
-                    <div key={group.entries[0]!.id} className="px-4 flex flex-col gap-3">
-                      {group.entries.map((entry, _idx) => {
-                        const details = (entry.details ?? {}) as Record<string, string>;
-                        const isStatusChange = entry.action === "status_changed";
-                        const isPriorityChange = entry.action === "priority_changed";
-                        const isDueDateChange = entry.action === "due_date_changed";
-
-                        let leadIcon: React.ReactNode;
-                        if (isStatusChange && details.to) {
-                          leadIcon = <StatusIcon status={details.to as IssueStatus} className="h-4 w-4 shrink-0" />;
-                        } else if (isPriorityChange && details.to) {
-                          leadIcon = <PriorityIcon priority={details.to as IssuePriority} className="h-4 w-4 shrink-0" />;
-                        } else if (isDueDateChange) {
-                          leadIcon = <Calendar className="h-4 w-4 shrink-0 text-muted-foreground" />;
-                        } else {
-                          leadIcon = <ActorAvatar actorType={entry.actor_type} actorId={entry.actor_id} size={16} />;
-                        }
-
-                        return (
-                          <div key={entry.id} className="flex items-center text-xs text-muted-foreground">
-                            <div className="mr-2 flex w-4 shrink-0 justify-center">
-                              {leadIcon}
-                            </div>
-                            <div className="flex min-w-0 flex-1 items-center gap-1">
-                              <span className="shrink-0 font-medium">{getActorName(entry.actor_type, entry.actor_id)}</span>
-                              <span className="truncate">{formatActivity(entry, getActorName)}</span>
-                              <Tooltip>
-                                <TooltipTrigger
-                                  render={
-                                    <span className="ml-auto shrink-0 cursor-default">
-                                      {timeAgo(entry.created_at)}
-                                    </span>
-                                  }
-                                />
-                                <TooltipContent side="top">
-                                  {new Date(entry.created_at).toLocaleString()}
-                                </TooltipContent>
-                              </Tooltip>
-                            </div>
-                          </div>
-                        );
-                      })}
+                    <div key={entry.id} id={`comment-${entry.id}`}>
+                      <CommentCard
+                        issueId={id}
+                        entry={entry}
+                        allReplies={timelineView.repliesByParent}
+                        currentUserId={user?.id}
+                        canModerate={canModerateComments}
+                        onReply={submitReply}
+                        onEdit={editComment}
+                        onDelete={deleteComment}
+                        onToggleReaction={handleToggleReaction}
+                        highlightedCommentId={highlightedId}
+                      />
                     </div>
                   );
-                });
-              })()}
+                }
+
+                return (
+                  <div key={group.entries[0]!.id} className="px-4 flex flex-col gap-3">
+                    {group.entries.map((entry, _idx) => {
+                      const details = (entry.details ?? {}) as Record<string, string>;
+                      const isStatusChange = entry.action === "status_changed";
+                      const isPriorityChange = entry.action === "priority_changed";
+                      const isDueDateChange = entry.action === "due_date_changed";
+
+                      let leadIcon: React.ReactNode;
+                      if (isStatusChange && details.to) {
+                        leadIcon = <StatusIcon status={details.to as IssueStatus} className="h-4 w-4 shrink-0" />;
+                      } else if (isPriorityChange && details.to) {
+                        leadIcon = <PriorityIcon priority={details.to as IssuePriority} className="h-4 w-4 shrink-0" />;
+                      } else if (isDueDateChange) {
+                        leadIcon = <Calendar className="h-4 w-4 shrink-0 text-muted-foreground" />;
+                      } else {
+                        leadIcon = <ActorAvatar actorType={entry.actor_type} actorId={entry.actor_id} size={16} />;
+                      }
+
+                      return (
+                        <div key={entry.id} className="flex items-center text-xs text-muted-foreground">
+                          <div className="mr-2 flex w-4 shrink-0 justify-center">
+                            {leadIcon}
+                          </div>
+                          <div className="flex min-w-0 flex-1 items-center gap-1">
+                            <span className="shrink-0 font-medium">{getActorName(entry.actor_type, entry.actor_id)}</span>
+                            <span className="truncate">{formatActivity(entry, t, getActorName)}</span>
+                            <Tooltip>
+                              <TooltipTrigger
+                                render={
+                                  <span className="ml-auto shrink-0 cursor-default">
+                                    {timeAgo(entry.created_at)}
+                                  </span>
+                                }
+                              />
+                              <TooltipContent side="top">
+                                {new Date(entry.created_at).toLocaleString()}
+                              </TooltipContent>
+                            </Tooltip>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })}
             </div>
+            {(hasMoreNewer || !isAtLatest) && (
+              <div className="mt-4 flex items-center justify-center gap-4">
+                {hasMoreNewer && (
+                  <button
+                    onClick={fetchNewer}
+                    disabled={isFetchingNewer}
+                    className="text-xs text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+                  >
+                    {isFetchingNewer
+                      ? t(($) => $.timeline.loading)
+                      : t(($) => $.timeline.show_newer)}
+                  </button>
+                )}
+                {!isAtLatest && (
+                  <button
+                    onClick={jumpToLatest}
+                    className="text-xs font-medium text-foreground hover:text-foreground/80 transition-colors"
+                  >
+                    {newEntriesBelowCount > 0
+                      ? t(($) => $.timeline.jump_to_latest_with_count, {
+                          count: newEntriesBelowCount,
+                        })
+                      : t(($) => $.timeline.jump_to_latest)}
+                  </button>
+                )}
+              </div>
+            )}
+            </>
+            )}
 
             {/* Bottom comment input — no avatar, full width */}
             <div className="mt-4">
@@ -975,9 +1122,27 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
         </div>
         </div>
       </div>
+  );
+
+  if (isMobile) {
+    return (
+      <div className="flex flex-1 min-h-0">
+        {detailContent}
+        <Sheet open={mobileSidebarOpen} onOpenChange={setMobileSidebarOpen}>
+          <SheetContent side="right" showCloseButton={false} className="w-[320px] overflow-y-auto p-4">
+            {sidebarContent}
+          </SheetContent>
+        </Sheet>
+      </div>
+    );
+  }
+
+  return (
+    <ResizablePanelGroup orientation="horizontal" className="flex-1 min-h-0" defaultLayout={defaultLayout} onLayoutChanged={onLayoutChanged}>
+      <ResizablePanel id="content" minSize="50%">
+        {detailContent}
       </ResizablePanel>
-      {!isMobile && <ResizableHandle />}
-      {!isMobile && (
+      <ResizableHandle />
       <ResizablePanel
         id="sidebar"
         defaultSize={defaultSidebarOpen ? 320 : 0}
@@ -986,7 +1151,7 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
         collapsible
         groupResizeBehavior="preserve-pixel-size"
         panelRef={sidebarRef}
-        onResize={(size) => setSidebarOpen(size.inPixels > 0)}
+        onResize={(size) => setDesktopSidebarOpen(size.inPixels > 0)}
       >
       <div className="overflow-y-auto border-l h-full">
         <div className="p-4">
@@ -994,14 +1159,6 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
         </div>
       </div>
       </ResizablePanel>
-      )}
-      {isMobile && (
-        <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
-          <SheetContent side="right" showCloseButton={false} className="w-[320px] overflow-y-auto p-4">
-            {sidebarContent}
-          </SheetContent>
-        </Sheet>
-      )}
     </ResizablePanelGroup>
   );
 }

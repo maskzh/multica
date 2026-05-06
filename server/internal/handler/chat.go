@@ -2,10 +2,12 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
@@ -174,7 +176,12 @@ func (h *Handler) GetChatSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, chatSessionToResponse(session))
 }
 
-func (h *Handler) ArchiveChatSession(w http.ResponseWriter, r *http.Request) {
+// DeleteChatSession hard-deletes a chat session owned by the caller. The
+// row lock + cancel + delete run inside a single tx so a concurrent
+// SendChatMessage cannot enqueue a task that would later be orphaned by
+// the FK ON DELETE SET NULL on agent_task_queue.chat_session_id. Cancel
+// failure aborts the delete; events fire only after commit.
+func (h *Handler) DeleteChatSession(w http.ResponseWriter, r *http.Request) {
 	userID, ok := requireUserID(w, r)
 	if !ok {
 		return
@@ -187,10 +194,53 @@ func (h *Handler) ArchiveChatSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.Queries.ArchiveChatSession(r.Context(), session.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to archive chat session")
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start transaction")
 		return
 	}
+	defer tx.Rollback(r.Context())
+	qtx := h.Queries.WithTx(tx)
+
+	// FOR UPDATE on the chat_session row blocks any concurrent INSERT into
+	// agent_task_queue that references it (the FK validation needs a
+	// KEY SHARE lock). After we commit the delete, the blocked INSERT
+	// fails its FK check, so it can't land an orphaned task.
+	if _, err := qtx.LockChatSessionForDelete(r.Context(), session.ID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Already gone — treat as idempotent success.
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to lock chat session")
+		return
+	}
+
+	cancelled, err := qtx.CancelAgentTasksByChatSession(r.Context(), session.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to cancel chat session tasks")
+		return
+	}
+
+	if err := qtx.DeleteChatSession(r.Context(), session.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete chat session")
+		return
+	}
+
+	if err := tx.Commit(r.Context()); err != nil {
+		slog.Warn("commit chat session delete failed", "session_id", sessionID, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to commit chat session delete")
+		return
+	}
+
+	// Post-commit broadcasts. Subscribers should never observe events for a
+	// tx that didn't actually persist.
+	h.TaskService.BroadcastCancelledTasks(r.Context(), cancelled)
+
+	resolvedSessionID := uuidToString(session.ID)
+	h.publishChat(protocol.EventChatSessionDeleted, workspaceID, "member", userID, resolvedSessionID, protocol.ChatSessionDeletedPayload{
+		ChatSessionID: resolvedSessionID,
+	})
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -206,6 +256,12 @@ type SendChatMessageRequest struct {
 type SendChatMessageResponse struct {
 	MessageID string `json:"message_id"`
 	TaskID    string `json:"task_id"`
+	// CreatedAt anchors the chat StatusPill timer the instant the user
+	// hits send. Without it the front-end falls back to its local clock
+	// and the timer "snaps backwards" later when WS events deliver the
+	// real created_at. Returning it here means the pill renders 0s from
+	// the start with a stable anchor.
+	CreatedAt string `json:"created_at"`
 }
 
 func (h *Handler) SendChatMessage(w http.ResponseWriter, r *http.Request) {
@@ -231,6 +287,10 @@ func (h *Handler) SendChatMessage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// New archive flow doesn't exist anymore, but legacy rows with
+	// status='archived' may still be in the DB from before the feature
+	// was removed. Refuse to enqueue new agent work for them — frontend
+	// surfaces these as read-only.
 	if session.Status != "active" {
 		writeError(w, http.StatusBadRequest, "chat session is archived")
 		return
@@ -273,6 +333,7 @@ func (h *Handler) SendChatMessage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, SendChatMessageResponse{
 		MessageID: uuidToString(msg.ID),
 		TaskID:    uuidToString(task.ID),
+		CreatedAt: timestampToString(task.CreatedAt),
 	})
 }
 
@@ -304,9 +365,14 @@ func (h *Handler) ListChatMessages(w http.ResponseWriter, r *http.Request) {
 
 // PendingChatTaskResponse is returned by GetPendingChatTask — either the
 // current in-flight task's id/status, or an empty object when none is active.
+// CreatedAt is the anchor the frontend uses to time the chat StatusPill
+// (elapsed seconds = now - CreatedAt). It must come from the server because
+// optimistic seeds don't have a real task created_at and the timer needs to
+// survive refresh / reopen.
 type PendingChatTaskResponse struct {
-	TaskID string `json:"task_id,omitempty"`
-	Status string `json:"status,omitempty"`
+	TaskID    string `json:"task_id,omitempty"`
+	Status    string `json:"status,omitempty"`
+	CreatedAt string `json:"created_at,omitempty"`
 }
 
 // MarkChatSessionRead clears the session's unread_since (→ has_unread=false)
@@ -403,8 +469,9 @@ func (h *Handler) GetPendingChatTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, PendingChatTaskResponse{
-		TaskID: uuidToString(task.ID),
-		Status: task.Status,
+		TaskID:    uuidToString(task.ID),
+		Status:    task.Status,
+		CreatedAt: timestampToString(task.CreatedAt),
 	})
 }
 
@@ -491,6 +558,12 @@ type ChatMessageResponse struct {
 	Content       string  `json:"content"`
 	TaskID        *string `json:"task_id"`
 	CreatedAt     string  `json:"created_at"`
+	// FailureReason flags an assistant row synthesized by FailTask's chat
+	// fallback. Front-end uses it to switch to the destructive bubble.
+	FailureReason *string `json:"failure_reason"`
+	// ElapsedMs is the wall-clock duration from task creation to terminal
+	// state. Drives "Replied in 38s" / "Failed after 12s" captions.
+	ElapsedMs *int64 `json:"elapsed_ms"`
 }
 
 func chatSessionToResponse(s db.ChatSession) ChatSessionResponse {
@@ -514,5 +587,7 @@ func chatMessageToResponse(m db.ChatMessage) ChatMessageResponse {
 		Content:       m.Content,
 		TaskID:        uuidToPtr(m.TaskID),
 		CreatedAt:     timestampToString(m.CreatedAt),
+		FailureReason: textToPtr(m.FailureReason),
+		ElapsedMs:     int8ToPtr(m.ElapsedMs),
 	}
 }

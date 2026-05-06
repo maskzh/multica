@@ -9,7 +9,9 @@
     "workspaces",
     "members-roles",
     "issues",
+    "projects",
     "comments",
+    "project-resources",
     "---Agents---",
     "agents",
     "agents-create",
@@ -32,6 +34,8 @@
     "---Reference---",
     "cli",
     "auth-tokens",
-    "desktop-app"
+    "desktop-app",
+    "---Developers---",
+    "developers"
   ]
 }
