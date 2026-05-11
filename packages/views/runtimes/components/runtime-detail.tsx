@@ -616,30 +616,38 @@ function supportedTimezones(): string[] {
 }
 
 // VisibilityReadout renders a static "Private" / "Public" pill for users
-// who can't edit the runtime. Older backends that omit the field render as
-// "Private" to match the strict default.
+// who can't edit the runtime. The description used to sit under the chip;
+// it now lives in the hover tooltip so the Diagnostics column stays compact
+// and matches the surrounding sections. Older backends that omit the field
+// render as "Private" to match the strict default.
 function VisibilityReadout({ runtime }: { runtime: AgentRuntime }) {
   const { t } = useT("runtimes");
   const visibility = runtime.visibility === "public" ? "public" : "private";
   const Icon = visibility === "public" ? Globe : Lock;
   return (
-    <div className="space-y-1.5">
-      <div className="inline-flex items-center gap-1.5 rounded-md border bg-muted/30 px-2 py-1.5 text-xs">
-        <Icon className="h-3 w-3 text-muted-foreground" />
-        <span className="font-medium">
-          {t(($) => $.detail.visibility_label[visibility])}
-        </span>
-      </div>
-      <p className="text-[11px] leading-snug text-muted-foreground">
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span className="inline-flex items-center gap-1.5 rounded-md border bg-muted/30 px-2 py-1.5 text-xs">
+            <Icon className="h-3 w-3 text-muted-foreground" />
+            <span className="font-medium">
+              {t(($) => $.detail.visibility_label[visibility])}
+            </span>
+          </span>
+        }
+      />
+      <TooltipContent>
         {t(($) => $.detail.visibility_hint[visibility])}
-      </p>
-    </div>
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
 // VisibilityEditor lets the runtime owner (or workspace admin) flip
 // public↔private. The PATCH endpoint also re-checks; this is a UI gate, not
-// a security boundary.
+// a security boundary. Per-choice description text lives in the hover
+// tooltip so the two buttons stay a tight icon+label pair instead of the
+// previous two-line block that competed with the surrounding cards.
 function VisibilityEditor({ runtime }: { runtime: AgentRuntime }) {
   const { t } = useT("runtimes");
   const wsId = useWorkspaceId();
@@ -664,25 +672,23 @@ function VisibilityEditor({ runtime }: { runtime: AgentRuntime }) {
   };
 
   return (
-    <div className="space-y-1.5">
-      <div className="flex gap-2">
-        <VisibilityChoice
-          active={current === "private"}
-          icon={<Lock className="h-3.5 w-3.5" />}
-          label={t(($) => $.detail.visibility_label.private)}
-          hint={t(($) => $.detail.visibility_hint.private)}
-          disabled={updateRuntime.isPending}
-          onClick={() => flip("private")}
-        />
-        <VisibilityChoice
-          active={current === "public"}
-          icon={<Globe className="h-3.5 w-3.5" />}
-          label={t(($) => $.detail.visibility_label.public)}
-          hint={t(($) => $.detail.visibility_hint.public)}
-          disabled={updateRuntime.isPending}
-          onClick={() => flip("public")}
-        />
-      </div>
+    <div className="inline-flex items-center gap-0.5 rounded-md bg-muted p-0.5">
+      <VisibilityChoice
+        active={current === "private"}
+        icon={<Lock className="h-3 w-3" />}
+        label={t(($) => $.detail.visibility_label.private)}
+        tooltip={t(($) => $.detail.visibility_hint.private)}
+        disabled={updateRuntime.isPending}
+        onClick={() => flip("private")}
+      />
+      <VisibilityChoice
+        active={current === "public"}
+        icon={<Globe className="h-3 w-3" />}
+        label={t(($) => $.detail.visibility_label.public)}
+        tooltip={t(($) => $.detail.visibility_hint.public)}
+        disabled={updateRuntime.isPending}
+        onClick={() => flip("public")}
+      />
     </div>
   );
 }
@@ -691,36 +697,38 @@ function VisibilityChoice({
   active,
   icon,
   label,
-  hint,
+  tooltip,
   disabled,
   onClick,
 }: {
   active: boolean;
   icon: React.ReactNode;
   label: string;
-  hint: string;
+  tooltip: string;
   disabled: boolean;
   onClick: () => void;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      className={`flex flex-1 items-start gap-2 rounded-md border px-2.5 py-2 text-left text-xs transition-colors ${
-        active
-          ? "border-primary bg-primary/5"
-          : "border-border hover:bg-muted"
-      } ${disabled ? "cursor-not-allowed opacity-60" : ""}`}
-    >
-      <span className="mt-0.5 shrink-0 text-muted-foreground">{icon}</span>
-      <span className="min-w-0">
-        <span className="block font-medium">{label}</span>
-        <span className="block text-[11px] leading-snug text-muted-foreground">
-          {hint}
-        </span>
-      </span>
-    </button>
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <button
+            type="button"
+            onClick={onClick}
+            disabled={disabled}
+            className={`inline-flex items-center gap-1.5 rounded px-2 py-1 text-xs font-medium transition-colors ${
+              active
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground"
+            } ${disabled ? "cursor-not-allowed opacity-60" : ""}`}
+          >
+            <span className="shrink-0">{icon}</span>
+            <span>{label}</span>
+          </button>
+        }
+      />
+      <TooltipContent>{tooltip}</TooltipContent>
+    </Tooltip>
   );
 }
 
