@@ -11,6 +11,78 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const cancelAgentTasksByRuntimeOrAgent = `-- name: CancelAgentTasksByRuntimeOrAgent :many
+UPDATE agent_task_queue
+SET status = 'cancelled', completed_at = now()
+WHERE (runtime_id = ANY($1::uuid[]) OR agent_id = ANY($2::uuid[]))
+  AND status IN ('queued', 'dispatched', 'running')
+RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session
+`
+
+type CancelAgentTasksByRuntimeOrAgentParams struct {
+	RuntimeIds []pgtype.UUID `json:"runtime_ids"`
+	AgentIds   []pgtype.UUID `json:"agent_ids"`
+}
+
+// Cancels every active task that either lives on one of the given runtimes
+// OR belongs to one of the given agents. Used by the member-revocation flow:
+// the runtime-side covers tasks queued against the leaving member's runtimes;
+// the agent-side covers tasks pinned to a different runtime that those agents
+// left behind from a prior UpdateAgent (agent.runtime_id can change, but
+// agent_task_queue.runtime_id does not get rewritten when it does, so a task
+// queued on runtime A by agent X — later moved to runtime B — survives the
+// runtime-only revoke and could still be claimed because ClaimAgentTask does
+// not gate on agent.archived_at).
+//
+// We use 'cancelled' rather than 'failed' so the daemon's per-task status
+// poller (watchTaskCancellation) interrupts the running agent gracefully.
+// Returns the affected rows so the caller can broadcast task:cancelled and
+// reconcile per-agent status.
+func (q *Queries) CancelAgentTasksByRuntimeOrAgent(ctx context.Context, arg CancelAgentTasksByRuntimeOrAgentParams) ([]AgentTaskQueue, error) {
+	rows, err := q.db.Query(ctx, cancelAgentTasksByRuntimeOrAgent, arg.RuntimeIds, arg.AgentIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AgentTaskQueue{}
+	for rows.Next() {
+		var i AgentTaskQueue
+		if err := rows.Scan(
+			&i.ID,
+			&i.AgentID,
+			&i.IssueID,
+			&i.Status,
+			&i.Priority,
+			&i.DispatchedAt,
+			&i.StartedAt,
+			&i.CompletedAt,
+			&i.Result,
+			&i.Error,
+			&i.CreatedAt,
+			&i.Context,
+			&i.RuntimeID,
+			&i.SessionID,
+			&i.WorkDir,
+			&i.TriggerCommentID,
+			&i.ChatSessionID,
+			&i.AutopilotRunID,
+			&i.Attempt,
+			&i.MaxAttempts,
+			&i.ParentTaskID,
+			&i.FailureReason,
+			&i.TriggerSummary,
+			&i.ForceFreshSession,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const countActiveAgentsByRuntime = `-- name: CountActiveAgentsByRuntime :one
 SELECT count(*) FROM agent WHERE runtime_id = $1 AND archived_at IS NULL
 `
@@ -217,6 +289,53 @@ func (q *Queries) FindLegacyRuntimesByDaemonID(ctx context.Context, arg FindLega
 			&i.OwnerID,
 			&i.LegacyDaemonID,
 			&i.Timezone,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const forceOfflineRuntimesByIDs = `-- name: ForceOfflineRuntimesByIDs :many
+UPDATE agent_runtime
+SET status = 'offline', updated_at = now()
+WHERE id = ANY($1::uuid[]) AND status = 'online'
+RETURNING id, workspace_id, owner_id, daemon_id, provider
+`
+
+type ForceOfflineRuntimesByIDsRow struct {
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	OwnerID     pgtype.UUID `json:"owner_id"`
+	DaemonID    pgtype.Text `json:"daemon_id"`
+	Provider    string      `json:"provider"`
+}
+
+// Unconditionally flips a known set of runtime IDs to offline. Distinct from
+// MarkRuntimesOfflineByIDs (which keeps a stale-window predicate so the
+// sweeper cannot demote a runtime that just heartbeated): this variant is
+// used by intentional revocation paths — e.g. removing a workspace member —
+// where the caller has already decided the runtime should be offline
+// regardless of recent liveness.
+func (q *Queries) ForceOfflineRuntimesByIDs(ctx context.Context, runtimeIds []pgtype.UUID) ([]ForceOfflineRuntimesByIDsRow, error) {
+	rows, err := q.db.Query(ctx, forceOfflineRuntimesByIDs, runtimeIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ForceOfflineRuntimesByIDsRow{}
+	for rows.Next() {
+		var i ForceOfflineRuntimesByIDsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.OwnerID,
+			&i.DaemonID,
+			&i.Provider,
 		); err != nil {
 			return nil, err
 		}
