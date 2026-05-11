@@ -6,6 +6,7 @@ import {
   Trash2,
   ChevronRight,
   Cpu,
+  Globe,
   Lock,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -506,6 +507,9 @@ function DiagnosticsCard({
 }) {
   const { t } = useT("runtimes");
   const isLocal = runtime.runtime_mode === "local";
+  // canDelete here doubles as the "can edit runtime" predicate — it already
+  // means "workspace owner/admin OR runtime owner", which is the same gate
+  // the server enforces for the visibility PATCH.
   return (
     <div className="rounded-lg border">
       <div className="border-b px-4 py-2.5">
@@ -513,6 +517,16 @@ function DiagnosticsCard({
       </div>
       <div className="space-y-3 p-4">
         <div>
+          <div className="mb-1.5 text-[11px] uppercase tracking-wide text-muted-foreground">
+            {t(($) => $.detail.diagnostics_visibility)}
+          </div>
+          {canDelete ? (
+            <VisibilityEditor runtime={runtime} />
+          ) : (
+            <VisibilityReadout runtime={runtime} />
+          )}
+        </div>
+        <div className="border-t pt-3">
           <div className="mb-1.5 text-[11px] uppercase tracking-wide text-muted-foreground">
             {t(($) => $.detail.diagnostics_timezone)}
           </div>
@@ -599,6 +613,115 @@ function supportedTimezones(): string[] {
   } catch {
     return COMMON_TIMEZONES;
   }
+}
+
+// VisibilityReadout renders a static "Private" / "Public" pill for users
+// who can't edit the runtime. Older backends that omit the field render as
+// "Private" to match the strict default.
+function VisibilityReadout({ runtime }: { runtime: AgentRuntime }) {
+  const { t } = useT("runtimes");
+  const visibility = runtime.visibility === "public" ? "public" : "private";
+  const Icon = visibility === "public" ? Globe : Lock;
+  return (
+    <div className="space-y-1.5">
+      <div className="inline-flex items-center gap-1.5 rounded-md border bg-muted/30 px-2 py-1.5 text-xs">
+        <Icon className="h-3 w-3 text-muted-foreground" />
+        <span className="font-medium">
+          {t(($) => $.detail.visibility_label[visibility])}
+        </span>
+      </div>
+      <p className="text-[11px] leading-snug text-muted-foreground">
+        {t(($) => $.detail.visibility_hint[visibility])}
+      </p>
+    </div>
+  );
+}
+
+// VisibilityEditor lets the runtime owner (or workspace admin) flip
+// public↔private. The PATCH endpoint also re-checks; this is a UI gate, not
+// a security boundary.
+function VisibilityEditor({ runtime }: { runtime: AgentRuntime }) {
+  const { t } = useT("runtimes");
+  const wsId = useWorkspaceId();
+  const updateRuntime = useUpdateRuntime(wsId);
+  const current = runtime.visibility === "public" ? "public" : "private";
+
+  const flip = (next: "private" | "public") => {
+    if (next === current) return;
+    updateRuntime.mutate(
+      { runtimeId: runtime.id, patch: { visibility: next } },
+      {
+        onSuccess: () =>
+          toast.success(
+            t(($) => $.detail.visibility_toast_updated, {
+              visibility: t(($) => $.detail.visibility_label[next]),
+            }),
+          ),
+        onError: () =>
+          toast.error(t(($) => $.detail.visibility_toast_failed)),
+      },
+    );
+  };
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex gap-2">
+        <VisibilityChoice
+          active={current === "private"}
+          icon={<Lock className="h-3.5 w-3.5" />}
+          label={t(($) => $.detail.visibility_label.private)}
+          hint={t(($) => $.detail.visibility_hint.private)}
+          disabled={updateRuntime.isPending}
+          onClick={() => flip("private")}
+        />
+        <VisibilityChoice
+          active={current === "public"}
+          icon={<Globe className="h-3.5 w-3.5" />}
+          label={t(($) => $.detail.visibility_label.public)}
+          hint={t(($) => $.detail.visibility_hint.public)}
+          disabled={updateRuntime.isPending}
+          onClick={() => flip("public")}
+        />
+      </div>
+    </div>
+  );
+}
+
+function VisibilityChoice({
+  active,
+  icon,
+  label,
+  hint,
+  disabled,
+  onClick,
+}: {
+  active: boolean;
+  icon: React.ReactNode;
+  label: string;
+  hint: string;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`flex flex-1 items-start gap-2 rounded-md border px-2.5 py-2 text-left text-xs transition-colors ${
+        active
+          ? "border-primary bg-primary/5"
+          : "border-border hover:bg-muted"
+      } ${disabled ? "cursor-not-allowed opacity-60" : ""}`}
+    >
+      <span className="mt-0.5 shrink-0 text-muted-foreground">{icon}</span>
+      <span className="min-w-0">
+        <span className="block font-medium">{label}</span>
+        <span className="block text-[11px] leading-snug text-muted-foreground">
+          {hint}
+        </span>
+      </span>
+    </button>
+  );
 }
 
 function TimezoneReadout({ runtime }: { runtime: AgentRuntime }) {

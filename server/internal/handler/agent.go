@@ -458,6 +458,15 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	member, ok := h.workspaceMember(w, r, workspaceID)
+	if !ok {
+		return
+	}
+	if !canUseRuntimeForAgent(member, runtime) {
+		writeError(w, http.StatusForbidden, "this runtime is private; only its owner or a workspace admin can create agents on it")
+		return
+	}
+
 	// Probe workspace agent count BEFORE the insert so the funnel has a
 	// clean "first agent ever in this workspace" signal — Step 4 of
 	// onboarding always lands in this branch. A non-fatal read: if the
@@ -671,6 +680,17 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		})
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid runtime_id")
+			return
+		}
+		// Same gate as CreateAgent — prevents UpdateAgent from being used to
+		// re-bind an agent onto someone else's private runtime, which would
+		// otherwise be a quiet end-run around the CreateAgent check.
+		member, ok := h.workspaceMember(w, r, uuidToString(agent.WorkspaceID))
+		if !ok {
+			return
+		}
+		if !canUseRuntimeForAgent(member, runtime) {
+			writeError(w, http.StatusForbidden, "this runtime is private; only its owner or a workspace admin can move agents onto it")
 			return
 		}
 		params.RuntimeID = runtime.ID
