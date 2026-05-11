@@ -54,6 +54,11 @@ func (h *Handler) requireDaemonWorkspaceAccess(w http.ResponseWriter, r *http.Re
 }
 
 // requireDaemonRuntimeAccess looks up a runtime and verifies the caller owns its workspace.
+//
+// Only pgx.ErrNoRows is treated as a real "runtime gone" 404 — the daemon uses
+// that response to drop the stale runtime from its in-memory map and re-register,
+// so collapsing transient DB errors into the same 404 would force the daemon to
+// self-cleanup on a hiccup. Other DB errors become 500.
 func (h *Handler) requireDaemonRuntimeAccess(w http.ResponseWriter, r *http.Request, runtimeID string) (db.AgentRuntime, bool) {
 	runtimeUUID, ok := parseUUIDOrBadRequest(w, runtimeID, "runtime_id")
 	if !ok {
@@ -61,7 +66,12 @@ func (h *Handler) requireDaemonRuntimeAccess(w http.ResponseWriter, r *http.Requ
 	}
 	rt, err := h.Queries.GetAgentRuntime(r.Context(), runtimeUUID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "runtime not found")
+		if isNotFound(err) {
+			writeError(w, http.StatusNotFound, "runtime not found")
+			return db.AgentRuntime{}, false
+		}
+		slog.Warn("get agent runtime failed", "runtime_id", runtimeID, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to load runtime")
 		return db.AgentRuntime{}, false
 	}
 	if !h.requireDaemonWorkspaceAccess(w, r, uuidToString(rt.WorkspaceID)) {
@@ -672,8 +682,18 @@ func (h *Handler) DaemonHeartbeat(w http.ResponseWriter, r *http.Request) {
 	rt, lookupErr := h.Queries.GetAgentRuntime(r.Context(), runtimeUUID)
 	runtimeLookupMs = time.Since(lookupStart).Milliseconds()
 	if lookupErr != nil {
-		outcome = "runtime_not_found"
-		writeError(w, http.StatusNotFound, "runtime not found")
+		// Only pgx.ErrNoRows means the runtime row is gone. Daemon reads this
+		// 404 as a signal to drop the stale runtime locally; treating a
+		// transient DB error the same way would force daemons to self-cleanup
+		// on a hiccup.
+		if isNotFound(lookupErr) {
+			outcome = "runtime_not_found"
+			writeError(w, http.StatusNotFound, "runtime not found")
+			return
+		}
+		outcome = "runtime_lookup_error"
+		slog.Warn("get agent runtime failed", "runtime_id", req.RuntimeID, "error", lookupErr)
+		writeError(w, http.StatusInternalServerError, "failed to load runtime")
 		return
 	}
 	wsCheckStart := time.Now()
@@ -729,6 +749,13 @@ func (h *Handler) DaemonHeartbeat(w http.ResponseWriter, r *http.Request) {
 // Workspace authorization is re-checked on every heartbeat instead of trusted
 // from the upgrade-time check because runtime ownership can change (e.g. a
 // runtime is reassigned to another workspace mid-connection).
+//
+// When the runtime row is missing (pgx.ErrNoRows), the function returns a
+// successful ack with Status=HeartbeatStatusRuntimeGone and RuntimeGone=true
+// instead of an error. That keeps the hub from logging every beat at Warn,
+// and tells the daemon to drop the stale runtime and re-register. Other DB
+// errors still propagate as errors so they keep their existing Warn logging
+// and the daemon does not mistake a hiccup for a deletion.
 func (h *Handler) HandleDaemonWSHeartbeat(ctx context.Context, identity daemonws.ClientIdentity, runtimeID string) (*protocol.DaemonHeartbeatAckPayload, error) {
 	runtimeUUID, err := util.ParseUUID(runtimeID)
 	if err != nil {
@@ -736,7 +763,14 @@ func (h *Handler) HandleDaemonWSHeartbeat(ctx context.Context, identity daemonws
 	}
 	rt, err := h.Queries.GetAgentRuntime(ctx, runtimeUUID)
 	if err != nil {
-		return nil, fmt.Errorf("runtime not found: %w", err)
+		if isNotFound(err) {
+			return &protocol.DaemonHeartbeatAckPayload{
+				RuntimeID:   runtimeID,
+				Status:      protocol.HeartbeatStatusRuntimeGone,
+				RuntimeGone: true,
+			}, nil
+		}
+		return nil, fmt.Errorf("get agent runtime: %w", err)
 	}
 	if identity.WorkspaceID != "" && identity.WorkspaceID != uuidToString(rt.WorkspaceID) {
 		return nil, fmt.Errorf("runtime not in connection workspace")
