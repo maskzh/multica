@@ -375,6 +375,30 @@ function renderIssueDetail(issueId = "issue-1") {
   );
 }
 
+function renderIssueDetailWithHighlight(
+  highlightCommentId: string,
+  issueId = "issue-1",
+  options: { seedTimeline?: boolean } = {},
+) {
+  const queryClient = createTestQueryClient();
+  if (options.seedTimeline) {
+    // Pre-populate the timeline cache so the first render sees timeline.length>0.
+    // This reproduces the inbox-click race: timeline data is available before
+    // the issue itself has finished loading, so the effect that scrolls to
+    // the comment fires once with `loading=true` (skeleton still rendered,
+    // no comment DOM) and must re-fire when `loading` flips to false.
+    queryClient.setQueryData(["issues", "timeline", issueId], mockTimeline);
+  }
+  const result = render(
+    <I18nProvider locale="en" resources={TEST_RESOURCES}>
+      <QueryClientProvider client={queryClient}>
+        <IssueDetail issueId={issueId} highlightCommentId={highlightCommentId} />
+      </QueryClientProvider>
+    </I18nProvider>,
+  );
+  return { ...result, queryClient };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -508,6 +532,67 @@ describe("IssueDetail (shared)", () => {
     });
 
     expect(screen.getByText("I can help with this")).toBeInTheDocument();
+  });
+
+  describe("highlightCommentId scroll-to-comment", () => {
+    let scrollIntoViewSpy: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      scrollIntoViewSpy = vi.fn();
+      Element.prototype.scrollIntoView =
+        scrollIntoViewSpy as unknown as Element["scrollIntoView"];
+    });
+
+    it("scrolls to the highlighted comment after both issue and timeline finish loading", async () => {
+      renderIssueDetailWithHighlight("comment-2");
+
+      // Wait until the comment DOM is rendered.
+      await waitFor(() => {
+        expect(document.getElementById("comment-comment-2")).not.toBeNull();
+      });
+
+      // requestAnimationFrame defers the actual scrollIntoView call.
+      await waitFor(() => {
+        expect(scrollIntoViewSpy).toHaveBeenCalled();
+      });
+
+      const callContext = scrollIntoViewSpy.mock.contexts[0] as HTMLElement;
+      expect(callContext.id).toBe("comment-comment-2");
+    });
+
+    it("still scrolls when the timeline is ready before the issue (regression for inbox click)", async () => {
+      // Reproduces the inbox-click race: timeline data is already in the cache
+      // (resolved first), but the issue is still pending — so the first render
+      // sees timeline.length=2 alongside loading=true (skeleton still showing,
+      // no comment DOM). The scroll effect fires once, fails to find the
+      // element, and must re-fire when `loading` flips to false. Without
+      // `loading` in the dep list, that second fire never happens and the
+      // user lands at the top of the issue.
+      let resolveIssue: (value: Issue) => void = () => {};
+      const issuePromise = new Promise<Issue>((resolve) => {
+        resolveIssue = resolve;
+      });
+      mockApiObj.getIssue.mockReturnValue(issuePromise);
+
+      renderIssueDetailWithHighlight("comment-2", "issue-1", { seedTimeline: true });
+
+      // The skeleton is still showing (issue pending), so even though
+      // timeline.length>0 the comment DOM is not mounted and no scroll
+      // can happen yet.
+      expect(document.getElementById("comment-comment-2")).toBeNull();
+      expect(scrollIntoViewSpy).not.toHaveBeenCalled();
+
+      // Now the issue resolves — comment elements mount, the effect re-runs
+      // because `loading` is part of its deps, and the scroll fires.
+      resolveIssue(mockIssue);
+
+      await waitFor(() => {
+        expect(document.getElementById("comment-comment-2")).not.toBeNull();
+      });
+      await waitFor(() => {
+        expect(scrollIntoViewSpy).toHaveBeenCalled();
+      });
+    });
   });
 
   it("sends empty description when editor is cleared", async () => {

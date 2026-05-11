@@ -581,9 +581,15 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
 
   const loading = issueLoading;
 
-  // Scroll to highlighted comment once timeline loads (fire only once per highlightCommentId)
+  // Scroll to highlighted comment once both the issue and its timeline are
+  // available (fire only once per highlightCommentId). `loading` must be in
+  // the dep list: when timeline.length flips to >0 while the issue itself is
+  // still loading, the component is still rendering the skeleton, so
+  // getElementById finds nothing — without re-running on the loading→false
+  // transition, the scroll silently never happens and the user lands at the
+  // top of the issue.
   useEffect(() => {
-    if (!highlightCommentId || timeline.length === 0) return;
+    if (!highlightCommentId || timeline.length === 0 || loading) return;
     if (didHighlightRef.current === highlightCommentId) return;
     const el = document.getElementById(`comment-${highlightCommentId}`);
     if (el) {
@@ -591,11 +597,10 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
       requestAnimationFrame(() => {
         el.scrollIntoView({ behavior: "instant", block: "center" });
         setHighlightedId(highlightCommentId);
-        const timer = setTimeout(() => setHighlightedId(null), 2000);
-        return () => clearTimeout(timer);
+        setTimeout(() => setHighlightedId(null), 2000);
       });
     }
-  }, [highlightCommentId, timeline.length]);
+  }, [highlightCommentId, timeline.length, loading]);
 
   const descEditorRef = useRef<ContentEditorRef>(null);
   const { isDragOver: descDragOver, dropZoneProps: descDropZoneProps } = useFileDropZone({
