@@ -79,7 +79,7 @@ function ensureStarted(
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const { pathname } = new URL(request.url);
 
     if (isBackendPath(pathname)) {
@@ -87,6 +87,12 @@ export default {
       await ensureStarted(backend, env);
       return backend.fetch(request);
     }
+
+    // Speculatively warm backend.start() in the background while HTML/JS
+    // download. ensureStarted dedupes per isolate, so when the page's client
+    // JS fires /api/* a moment later, that request's `await ensureStarted`
+    // joins the same in-flight promise instead of starting fresh.
+    ctx.waitUntil(ensureStarted(getContainer(env.BACKEND, "main"), env));
 
     return env.FRONTEND_WORKER.fetch(request);
   },
