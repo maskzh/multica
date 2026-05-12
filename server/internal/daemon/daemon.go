@@ -1561,20 +1561,6 @@ func (d *Daemon) pollLoop(ctx context.Context, taskWakeups <-chan struct{}) erro
 			pollerWG.Add(1)
 			go func(rid string, pctx context.Context, wakeup <-chan struct{}) {
 				defer pollerWG.Done()
-				// Jittered initial delay (up to one full PollInterval) so
-				// pollers spawned together don't stay synchronized forever —
-				// without this, N runtimes hit ClaimTaskByRuntime in the same
-				// instant every tick, hammering the backend. Mirrors the
-				// thundering-herd guard in runRuntimeHeartbeat.
-				if d.cfg.PollInterval > 0 {
-					if jitter := time.Duration(rand.Int63n(int64(d.cfg.PollInterval))); jitter > 0 {
-						select {
-						case <-pctx.Done():
-							return
-						case <-time.After(jitter):
-						}
-					}
-				}
 				d.runRuntimePoller(pctx, ctx, rid, sem, wakeup, &taskWG)
 			}(rid, pctx, wakeup)
 		}
