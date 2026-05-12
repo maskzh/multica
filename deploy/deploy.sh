@@ -47,6 +47,17 @@ fi
 # ── Backend ────────────────────────────────────────────────────────────────────
 
 if $DEPLOY_BACKEND; then
+  # Gateway worker has an `assets` binding pointing at the web app's
+  # .open-next/assets directory so /_next/static/* etc. are served by CF's
+  # asset layer without crossing into a worker. The directory only exists
+  # after a web build, so fail fast if someone runs --backend in isolation
+  # against a fresh checkout.
+  if [ ! -d "$WEB_DIR/.open-next/assets" ]; then
+    echo "ERROR: $WEB_DIR/.open-next/assets is missing." >&2
+    echo "Run './deploy/deploy.sh --web' first (or omit --backend) to build static assets." >&2
+    exit 1
+  fi
+
   echo "==> [backend] Deploying multica Worker + container..."
   cd "$CF_DIR"
   npx wrangler deploy

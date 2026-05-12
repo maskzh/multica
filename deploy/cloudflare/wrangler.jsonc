@@ -3,6 +3,15 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-04-01",
   "routes": [{ "pattern": "multica.maskzh.com", "custom_domain": true }],
+  // Serve Next.js static assets (/_next/static/*, /favicon.svg, /images/*)
+  // directly from CF's edge cache. Without this, every static file traverses
+  // gateway worker → service binding → multica-web worker → env.ASSETS, costing
+  // two worker invocations per file. With assets bound here, CF's asset layer
+  // intercepts matching paths before the worker runs and falls through to
+  // src/index.ts only for non-asset requests.
+  "assets": {
+    "directory": "../../apps/web/.open-next/assets"
+  },
   "vars": {
     "APP_ENV": "production",
     "FRONTEND_ORIGIN": "https://multica.maskzh.com",
