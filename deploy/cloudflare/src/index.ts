@@ -17,6 +17,8 @@ interface Env {
   JWT_SECRET: string;
   AWS_ACCESS_KEY_ID: string;
   AWS_SECRET_ACCESS_KEY: string;
+  // Optional: base64-encoded 32-byte key. Absent = Lark integration off.
+  MULTICA_LARK_SECRET_KEY?: string;
   // Worker vars (non-sensitive)
   APP_ENV: string;
   FRONTEND_ORIGIN: string;
@@ -53,6 +55,8 @@ function buildEnvVars(env: Env) {
     CLOUDFRONT_DOMAIN: env.CLOUDFRONT_DOMAIN,
     AWS_ACCESS_KEY_ID: env.AWS_ACCESS_KEY_ID,
     AWS_SECRET_ACCESS_KEY: env.AWS_SECRET_ACCESS_KEY,
+    // Empty string is the server's "disabled" signal, same as unset.
+    MULTICA_LARK_SECRET_KEY: env.MULTICA_LARK_SECRET_KEY ?? "",
   };
 }
 
