@@ -1,20 +1,28 @@
 "use client";
 
-import { memo } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { memo, type Ref } from "react";
+import { useSortable, defaultAnimateLayoutChanges } from "@dnd-kit/sortable";
+import type { AnimateLayoutChanges } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { AppLink } from "../../navigation";
-import type { Issue } from "@multica/core/types";
+import type { Issue, Project,
+  IssueProperty,
+} from "@multica/core/types";
+import { formatDateOnly } from "@multica/core/issues/date";
 import { ActorAvatar } from "../../common/actor-avatar";
-import { useIssueSelectionStore } from "@multica/core/issues/stores/selection-store";
 import { useWorkspacePaths } from "@multica/core/paths";
-import { useWorkspaceId } from "@multica/core/hooks";
+import { useQuery } from "@tanstack/react-query";
 import { useViewStore } from "@multica/core/issues/stores/view-store-context";
-import { projectListOptions } from "@multica/core/projects/queries";
+import { useWorkspaceId } from "@multica/core/hooks";
+import { propertyListOptions } from "@multica/core/properties";
+import { CustomPropertyValueDisplay } from "./pickers/custom-property-picker";
 import { ProjectIcon } from "../../projects/components/project-icon";
 import { PriorityIcon } from "./priority-icon";
 import { ProgressRing } from "./progress-ring";
 import { IssueActionsContextMenu } from "../actions";
 import { LabelChip } from "../../labels/label-chip";
+import { IssueAgentActivityIndicator } from "./issue-agent-activity-indicator";
+import { useIssueSurfaceSelection } from "../surface/selection-context";
 
 export interface ChildProgress {
   done: number;
@@ -22,45 +30,64 @@ export interface ChildProgress {
 }
 
 function formatDate(date: string): string {
-  return new Date(date).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-  });
+  return formatDateOnly(date, { month: "short", day: "numeric" }, "en-US");
 }
 
-export const ListRow = memo(function ListRow({
+function ListRowContent({
   issue,
   childProgress,
+  project,
+  isDragging,
+  containerRef,
+  containerStyle,
+  containerProps,
+  checkboxProps,
 }: {
   issue: Issue;
   childProgress?: ChildProgress;
+  project?: Project;
+  isDragging?: boolean;
+  containerRef?: Ref<HTMLDivElement>;
+  containerStyle?: React.CSSProperties;
+  containerProps?: Record<string, unknown>;
+  checkboxProps?: Pick<React.HTMLAttributes<HTMLDivElement>, "onClick" | "onMouseDown" | "onPointerDown">;
 }) {
-  const selected = useIssueSelectionStore((s) => s.selectedIds.has(issue.id));
-  const toggle = useIssueSelectionStore((s) => s.toggle);
+  const selection = useIssueSurfaceSelection();
+  const selected = selection.selectedIds.has(issue.id);
+  const toggle = selection.toggle;
   const p = useWorkspacePaths();
   const storeProperties = useViewStore((s) => s.cardProperties);
-  const wsId = useWorkspaceId();
-  const { data: projects = [] } = useQuery({
-    ...projectListOptions(wsId),
-    enabled: storeProperties.project && !!issue.project_id,
-  });
-  const project = issue.project_id ? projects.find((pr) => pr.id === issue.project_id) : undefined;
+  const cardPropertyIds = useViewStore((s) => s.cardPropertyIds);
+  const rowWsId = useWorkspaceId();
+  const { data: workspaceProperties = [] } = useQuery(propertyListOptions(rowWsId));
+  const cardCustomProperties = cardPropertyIds
+    .map((id) => workspaceProperties.find((p) => p.id === id))
+    .filter((p): p is IssueProperty => !!p && issue.properties?.[p.id] !== undefined);
   const labels = issue.labels ?? [];
 
   const showProject = storeProperties.project && project;
   const showChildProgress = storeProperties.childProgress && childProgress;
   const showAssignee = storeProperties.assignee && issue.assignee_type && issue.assignee_id;
+  const showStartDate = storeProperties.startDate && issue.start_date;
   const showDueDate = storeProperties.dueDate && issue.due_date;
   const showLabels = storeProperties.labels && labels.length > 0;
 
   return (
     <IssueActionsContextMenu issue={issue}>
       <div
-        className={`group/row flex h-9 items-center gap-2 px-4 text-sm transition-colors hover:not-data-[popup-open]:bg-accent/60 data-[popup-open]:bg-accent ${
-          selected ? "bg-accent/30" : ""
-        }`}
+        ref={containerRef}
+        style={containerStyle}
+        {...containerProps}
+        className={`group/row flex h-9 items-center gap-2 px-4 text-sm transition-colors ${
+          selected
+            ? "bg-surface-selected hover:not-data-[popup-open]:bg-surface-selected data-[popup-open]:bg-surface-selected"
+            : "hover:not-data-[popup-open]:bg-surface-hover data-[popup-open]:bg-surface-hover"
+        } ${isDragging ? "opacity-30" : ""}`}
       >
-        <div className="relative flex shrink-0 items-center justify-center w-4 h-4">
+        <div
+          className="relative flex shrink-0 items-center justify-center w-4 h-4"
+          {...checkboxProps}
+        >
           <PriorityIcon
             priority={issue.priority}
             className={selected ? "hidden" : "group-hover/row:hidden"}
@@ -76,11 +103,13 @@ export const ListRow = memo(function ListRow({
         </div>
         <AppLink
           href={p.issueDetail(issue.id)}
-          className="flex flex-1 items-center gap-2 min-w-0"
+          className={`flex flex-1 items-center gap-2 min-w-0 ${isDragging ? "pointer-events-none" : ""}`}
         >
           <span className="w-16 shrink-0 text-xs text-muted-foreground">
             {issue.identifier}
           </span>
+          <IssueAgentActivityIndicator issueId={issue.id} />
+
           <span className="flex min-w-0 flex-1 items-center gap-1.5">
             <span className="truncate">{issue.title}</span>
             {showChildProgress && (
@@ -103,11 +132,28 @@ export const ListRow = memo(function ListRow({
                 )}
               </span>
             )}
+            {cardCustomProperties.length > 0 && (
+              <span className="ml-1.5 hidden md:inline-flex shrink-0 items-center gap-1 max-w-[260px] overflow-hidden">
+                {cardCustomProperties.slice(0, 3).map((property) => (
+                  <span
+                    key={property.id}
+                    className="inline-flex max-w-[120px] items-center rounded-full bg-muted/60 px-1.5 py-0.5 text-[11px] text-muted-foreground"
+                  >
+                    <CustomPropertyValueDisplay property={property} value={issue.properties?.[property.id]} />
+                  </span>
+                ))}
+              </span>
+            )}
           </span>
           {showProject && (
             <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground max-w-[140px]">
               <ProjectIcon project={project} size="sm" />
               <span className="truncate">{project!.title}</span>
+            </span>
+          )}
+          {showStartDate && (
+            <span className="shrink-0 text-xs text-muted-foreground">
+              {formatDate(issue.start_date!)}
             </span>
           )}
           {showDueDate && (
@@ -119,12 +165,84 @@ export const ListRow = memo(function ListRow({
             <ActorAvatar
               actorType={issue.assignee_type!}
               actorId={issue.assignee_id!}
-              size={20}
+              size="sm"
               enableHoverCard
             />
           )}
         </AppLink>
       </div>
     </IssueActionsContextMenu>
+  );
+}
+
+export const ListRow = memo(function ListRow({
+  issue,
+  childProgress,
+  project,
+}: {
+  issue: Issue;
+  childProgress?: ChildProgress;
+  project?: Project;
+}) {
+  return (
+    <ListRowContent
+      issue={issue}
+      childProgress={childProgress}
+      project={project}
+    />
+  );
+});
+
+const animateLayoutChanges: AnimateLayoutChanges = (args) => {
+  const { isSorting, wasDragging } = args;
+  if (isSorting || wasDragging) return false;
+  return defaultAnimateLayoutChanges(args);
+};
+
+const stopDrag = (e: React.SyntheticEvent) => {
+  e.stopPropagation();
+};
+
+export const DraggableListRow = memo(function DraggableListRow({
+  issue,
+  childProgress,
+  project,
+  disableSorting,
+}: {
+  issue: Issue;
+  childProgress?: ChildProgress;
+  project?: Project;
+  disableSorting?: boolean;
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({
+    id: issue.id,
+    data: { status: issue.status },
+    animateLayoutChanges,
+    disabled: disableSorting ? { droppable: true } : undefined,
+  });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  };
+
+  return (
+    <ListRowContent
+      issue={issue}
+      childProgress={childProgress}
+      project={project}
+      isDragging={isDragging}
+      containerRef={setNodeRef}
+      containerStyle={style}
+      containerProps={{ ...attributes, ...listeners }}
+      checkboxProps={{ onClick: stopDrag, onMouseDown: stopDrag, onPointerDown: stopDrag }}
+    />
   );
 });

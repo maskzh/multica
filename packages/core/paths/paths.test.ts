@@ -13,15 +13,20 @@ describe("paths.workspace(slug)", () => {
     expect(ws.autopilots()).toBe("/acme/autopilots");
     expect(ws.autopilotDetail("a1")).toBe("/acme/autopilots/a1");
     expect(ws.agents()).toBe("/acme/agents");
+    expect(ws.newAgent()).toBe("/acme/agents/new");
     expect(ws.memberDetail("u1")).toBe("/acme/members/u1");
     expect(ws.inbox()).toBe("/acme/inbox");
     expect(ws.myIssues()).toBe("/acme/my-issues");
     expect(ws.runtimes()).toBe("/acme/runtimes");
+    expect(ws.runtimeSettings("machine/runtime", "runtime one")).toBe(
+      "/acme/runtimes/machine%2Fruntime/runtime/runtime%20one",
+    );
     expect(ws.skills()).toBe("/acme/skills");
     expect(ws.skillDetail("skl_123")).toBe("/acme/skills/skl_123");
     expect(ws.squads()).toBe("/acme/squads");
     expect(ws.squadDetail("sq_1")).toBe("/acme/squads/sq_1");
     expect(ws.settings()).toBe("/acme/settings");
+    expect(ws.attachmentPreview("att_42")).toBe("/acme/attachments/att_42/preview");
   });
 
   it("URL-encodes special characters in ids", () => {

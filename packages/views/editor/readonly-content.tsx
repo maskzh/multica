@@ -9,53 +9,55 @@
  *
  * Visual parity with ContentEditor is achieved by:
  * - Wrapping output in <div class="rich-text-editor readonly"> so the same
- *   content-editor.css rules apply to standard HTML tags
+ *   styles/index.css rules apply to standard HTML tags
  * - Using the same preprocessMarkdown pipeline (mention shortcodes + linkify)
  * - Using lowlight for code highlighting (same engine as Tiptap's CodeBlockLowlight)
- *   so .hljs-* CSS rules from content-editor.css produce identical colors
+ *   so .hljs-* CSS rules from styles/code.css produce identical colors
  * - Rendering mentions with the same IssueMentionCard component and .mention class
  */
 
-import { isValidElement, memo, useCallback, useMemo, useRef, useState } from "react";
+import { isValidElement, memo, useMemo, useRef, useState } from "react";
 import ReactMarkdown, {
   defaultUrlTransform,
   type Components,
 } from "react-markdown";
+import type { ReactNode } from "react";
 import rehypeKatex from "rehype-katex";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
-import { createLowlight, common } from "lowlight";
-// @ts-expect-error -- hast-util-to-html has no bundled type declarations
 import { toHtml } from "hast-util-to-html";
-import { Maximize2, Download, Eye, Link as LinkIcon, FileText } from "lucide-react";
-import { toast } from "sonner";
+import { Check, Copy } from "lucide-react";
 import { cn } from "@multica/ui/lib/utils";
+import { copyText } from "@multica/ui/lib/clipboard";
 import { useWorkspacePaths, useWorkspaceSlug } from "@multica/core/paths";
 import type { Attachment } from "@multica/core/types";
-import { useNavigation } from "../navigation";
 import { useT } from "../i18n";
-import { openExternal } from "../platform";
+import { useNavigation } from "../navigation";
 import { IssueMentionCard } from "../issues/components/issue-mention-card";
-import { ImageLightbox } from "./extensions/image-view";
+import { useResolveIssueIdentifier } from "../issues/hooks";
+import { ProjectChip } from "../projects/components/project-chip";
 import { useLinkHover, LinkHoverCard } from "./link-hover-card";
 import { openLink, isMentionHref } from "./utils/link-handler";
-import { isAllowedFileCardHref } from "@multica/ui/markdown";
+import { isAllowedFileCardHref, isIssueIdentifier } from "@multica/ui/markdown";
 import { preprocessMarkdown } from "./utils/preprocess";
+import { highlightToHtml } from "./utils/highlight-markdown";
 import { MermaidDiagram } from "./mermaid-diagram";
-import { useDownloadAttachment } from "./use-download-attachment";
-import { useAttachmentPreview, type PreviewSource } from "./attachment-preview-modal";
-import { getPreviewKind } from "./utils/preview";
+import { HtmlBlockPreview } from "./html-block-preview";
+import { AttachmentDownloadProvider } from "./attachment-download-context";
+import { Attachment as AttachmentRenderer } from "./attachment";
+import { highlightCode } from "./syntax-highlight";
 import "katex/dist/katex.min.css";
-import "./content-editor.css";
+import "./styles/index.css";
 
-// ---------------------------------------------------------------------------
-// Lowlight — same engine + language set as Tiptap's CodeBlockLowlight
-// ---------------------------------------------------------------------------
-
-const lowlight = createLowlight(common);
+// Code fences that the `code` renderer returns as a non-<code> React element
+// (Mermaid diagram, HTML preview iframe). The `pre` renderer below unwraps
+// these so the default <pre><code> envelope doesn't clamp their styles.
+// Anchored to whole class tokens so `language-htmlbars` / `language-mermaidx`
+// don't accidentally match and lose their <pre> wrapper.
+const PRE_UNWRAP_RE = /(^|\s)language-(html|mermaid)(\s|$)/;
 
 // ---------------------------------------------------------------------------
 // Sanitization schema — extends GitHub defaults to allow file-card data attrs
@@ -63,9 +65,16 @@ const lowlight = createLowlight(common);
 
 const sanitizeSchema = {
   ...defaultSchema,
+  // Allow <mark> (text highlight) — emitted by highlightToHtml from `==text==`.
+  // It carries no attributes, so only the tag name needs whitelisting.
+  tagNames: [...(defaultSchema.tagNames ?? []), "mark"],
   protocols: {
     ...defaultSchema.protocols,
-    href: [...(defaultSchema.protocols?.href ?? []), "mention"],
+    href: [...(defaultSchema.protocols?.href ?? []), "mention", "slash"],
+    // Permit inline data-URI images (QR codes, charts, base64 screenshots).
+    // The scheme gate only allows `data:` through here; attributes.img below
+    // narrows it to image/* so non-image data URIs are still rejected.
+    src: [...(defaultSchema.protocols?.src ?? []), "data"],
   },
   attributes: {
     ...defaultSchema.attributes,
@@ -82,8 +91,17 @@ const sanitizeSchema = {
       ["className", /^hljs/],
     ],
     img: [
-      ...(defaultSchema.attributes?.img ?? []),
+      // Drop the default plain `src` entry so the value allow-list below is the
+      // one findDefinition resolves — it returns the first match by name, so a
+      // bare `src` string would otherwise shadow (and disable) the allow-list.
+      ...(defaultSchema.attributes?.img ?? []).filter(
+        (attr) => (typeof attr === "string" ? attr : attr[0]) !== "src",
+      ),
       "alt",
+      // Allow inline data:image/* URIs while leaving every other src form
+      // (http/https/site-relative) exactly as before: the negative lookahead
+      // keeps all non-data values, and data: is narrowed to images only.
+      ["src", /^data:image\//i, /^(?!data:)/i],
     ],
   },
 };
@@ -94,6 +112,12 @@ const sanitizeSchema = {
 
 function urlTransform(url: string): string {
   if (url.startsWith("mention://")) return url;
+  if (url.startsWith("slash://skill/")) return url;
+  // Allow inline data:image/* URIs — defaultUrlTransform strips every data: URL
+  // to '', which would blank the src even after rehype-sanitize keeps it. Kept
+  // in sync with the image/* narrowing in sanitizeSchema (protocols.src +
+  // attributes.img) so both gates agree on what a valid inline image is.
+  if (/^data:image\//i.test(url)) return url;
   return defaultUrlTransform(url);
 }
 
@@ -101,10 +125,36 @@ function urlTransform(url: string): string {
 // Custom react-markdown components
 // ---------------------------------------------------------------------------
 
+/**
+ * Issue mention chip. Navigation — plain click, modifier click, and the
+ * "open issue links in new tab" preference — is owned by the AppLink inside
+ * IssueMentionCard; the wrapper only shields surrounding click handlers
+ * (e.g. collapsed-comment expanders) from mention clicks.
+ */
 function IssueMentionLink({ issueId, label }: { issueId: string; label?: string }) {
+  return (
+    <span className="inline align-middle" onClick={(e) => e.stopPropagation()}>
+      <IssueMentionCard issueId={issueId} fallbackLabel={label} />
+    </span>
+  );
+}
+
+/**
+ * Autolinked bare identifier (e.g. `MUL-123`) routed through
+ * `mention://issue/<identifier>` by the readonly preprocessor. Resolves to a
+ * real issue in the current workspace; renders a navigable mention on a hit,
+ * plain text on a miss / while loading / cross-workspace.
+ */
+function AutolinkedIssueMentionLink({ identifier }: { identifier: string }) {
+  const issue = useResolveIssueIdentifier(identifier);
+  if (!issue) return <>{identifier}</>;
+  return <IssueMentionLink issueId={issue.id} label={identifier} />;
+}
+
+function ProjectMentionLink({ projectId, label }: { projectId: string; label?: string }) {
   const { push, openInNewTab } = useNavigation();
   const p = useWorkspacePaths();
-  const path = p.issueDetail(issueId);
+  const path = p.projectDetail(projectId);
   return (
     <span
       className="inline align-middle"
@@ -120,8 +170,74 @@ function IssueMentionLink({ issueId, label }: { issueId: string; label?: string 
         push(path);
       }}
     >
-      <IssueMentionCard issueId={issueId} fallbackLabel={label} />
+      <ProjectChip projectId={projectId} fallbackLabel={label} className="cursor-pointer hover:bg-accent transition-colors" />
     </span>
+  );
+}
+
+function getTextContent(node: ReactNode): string {
+  if (node == null || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(getTextContent).join("");
+  if (isValidElement(node)) {
+    const props = node.props as { children?: ReactNode };
+    return getTextContent(props.children);
+  }
+  return "";
+}
+
+function ReadonlyCodeBlock({
+  children,
+  language,
+}: {
+  children: ReactNode;
+  language?: string;
+}) {
+  const { t } = useT("editor");
+  const [copied, setCopied] = useState(false);
+  const code = useMemo(
+    () => getTextContent(children).replace(/\n$/, ""),
+    [children],
+  );
+  const copyLabel = t(($) => $.code_block.copy_code) || "Copy code";
+
+  const handleCopy = async () => {
+    if (!code) return;
+    if (await copyText(code)) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  return (
+    <div className="code-block-wrapper group/code relative my-3">
+      <div className="absolute top-0 right-0 z-10 flex items-center gap-1.5 px-2 py-1.5 opacity-0 transition-opacity group-hover/code:opacity-100 focus-within:opacity-100">
+        {/* Same hover chrome as the editable code block's header
+            (code-block-view.tsx): language label + copy. */}
+        {language && (
+          <span className="text-xs text-muted-foreground select-none">
+            {language}
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={handleCopy}
+          className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+          title={copyLabel}
+          aria-label={copyLabel}
+        >
+          {copied ? (
+            <Check className="h-3.5 w-3.5" />
+          ) : (
+            <Copy className="h-3.5 w-3.5" />
+          )}
+        </button>
+      </div>
+      {/* No extra right padding: `.rich-text-editor pre` outranks utility
+          padding classes anyway, and the editable NodeView uses the same
+          1rem — keeping them identical keeps line wrapping identical. */}
+      <pre className="!m-0">{children}</pre>
+    </div>
   );
 }
 
@@ -137,9 +253,18 @@ function ReadonlyLink({
 }) {
   const slug = useWorkspaceSlug();
 
+  if (href?.startsWith("slash://skill/")) {
+    return <span className="slash-command">{children}</span>;
+  }
+
   if (isMentionHref(href)) {
-    const match = href.match(/^mention:\/\/(member|agent|issue|all)\/(.+)$/);
+    const match = href.match(/^mention:\/\/(member|agent|issue|project|all)\/(.+)$/);
     if (match?.[1] === "issue" && match[2]) {
+      // A bare identifier (from the autolink preprocessor) is carried as the id
+      // segment; a real mention carries a UUID. Dispatch on the id shape.
+      if (isIssueIdentifier(match[2])) {
+        return <AutolinkedIssueMentionLink identifier={match[2]} />;
+      }
       const label =
         typeof children === "string"
           ? children
@@ -147,6 +272,15 @@ function ReadonlyLink({
             ? children.join("")
             : undefined;
       return <IssueMentionLink issueId={match[2]} label={label} />;
+    }
+    if (match?.[1] === "project" && match[2]) {
+      const label =
+        typeof children === "string"
+          ? children
+          : Array.isArray(children)
+            ? children.join("")
+            : undefined;
+      return <ProjectMentionLink projectId={match[2]} label={label} />;
     }
     // Member / agent / all mentions
     return <span className="mention">{children}</span>;
@@ -166,165 +300,26 @@ function ReadonlyLink({
   );
 }
 
-// Image renderer with a download button that prefers fresh-signed URLs.
-// Lifted out of the components map so it can call hooks; receives the
-// attachment lookup as props so the components map can stay a pure
-// data-build inside `ReadonlyContent`'s `useMemo`.
-function ReadonlyImage({
-  src,
-  alt,
-  resolveAttachmentId,
-  onDownload,
-}: {
-  src?: string;
-  alt?: string;
-  resolveAttachmentId: (url: string) => string | undefined;
-  onDownload: (attachmentId: string) => void;
-}) {
-  const { t } = useT("editor");
-  const [lightbox, setLightbox] = useState(false);
-  const imgSrc = typeof src === "string" ? src : "";
-  const imgAlt = alt ?? "";
-
-  const handleView = () => setLightbox(true);
-  const handleDownload = () => {
-    const id = imgSrc ? resolveAttachmentId(imgSrc) : undefined;
-    if (id) {
-      onDownload(id);
-      return;
-    }
-    // External image — no attachment record to re-sign through. Falling back
-    // to `openExternal` keeps us off `window.open(...)` (which Electron's
-    // setWindowOpenHandler would route through openExternalSafely anyway,
-    // but only after rejecting non-http schemes loudly).
-    if (imgSrc) openExternal(imgSrc);
-  };
-  const handleCopyLink = async () => {
-    try {
-      await navigator.clipboard.writeText(imgSrc);
-      toast.success(t(($) => $.image.link_copied));
-    } catch {
-      toast.error(t(($) => $.image.copy_link_failed));
-    }
-  };
-
-  return (
-    <span className="image-node">
-      <span className="image-figure" onClick={handleView}>
-        <img src={imgSrc} alt={imgAlt} className="image-content" draggable={false} />
-        <span
-          className="image-toolbar"
-          onMouseDown={(e) => e.stopPropagation()}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <button type="button" onClick={handleView} title={t(($) => $.image.view)}>
-            <Maximize2 className="size-3.5" />
-          </button>
-          <button type="button" onClick={handleDownload} title={t(($) => $.image.download)}>
-            <Download className="size-3.5" />
-          </button>
-          <button type="button" onClick={handleCopyLink} title={t(($) => $.image.copy_link)}>
-            <LinkIcon className="size-3.5" />
-          </button>
-        </span>
-      </span>
-      {lightbox && (
-        <ImageLightbox src={imgSrc} alt={imgAlt} onClose={() => setLightbox(false)} />
-      )}
-    </span>
-  );
-}
-
-// Inline file card — same download semantics as the standalone attachment
-// list: fresh-sign through `useDownloadAttachment` when the href matches a
-// known attachment, otherwise hand the raw URL to the platform's external
-// opener.
-function ReadonlyFileCard({
-  href,
-  filename,
-  resolveAttachment,
-  onDownload,
-  onPreview,
-}: {
-  href: string;
-  filename: string;
-  resolveAttachment: (url: string) => Attachment | undefined;
-  onDownload: (attachmentId: string) => void;
-  onPreview: (source: PreviewSource) => boolean;
-}) {
-  const { t } = useT("editor");
-  const attachment = href ? resolveAttachment(href) : undefined;
-  // Mirror file-card.tsx (NodeView) — preview gate widens to "anything that
-  // can be downloaded AND whose filename is a previewable type". Media kinds
-  // fall through to URL-only when the attachment record isn't reachable.
-  const kind = filename
-    ? getPreviewKind(attachment?.content_type ?? "", filename)
-    : null;
-  const isMediaKind = kind === "pdf" || kind === "video" || kind === "audio";
-  const canPreview = !!href && kind !== null && (!!attachment || isMediaKind);
-  const handleDownloadClick = () => {
-    if (attachment) {
-      onDownload(attachment.id);
-      return;
-    }
-    openExternal(href);
-  };
-  const handlePreviewClick = () => {
-    if (attachment) {
-      onPreview({ kind: "full", attachment });
-    } else if (href) {
-      onPreview({ kind: "url", url: href, filename });
-    }
-  };
-  return (
-    <div className="my-1 flex items-center gap-2 rounded-md border border-border bg-muted/50 px-2.5 py-1 transition-colors hover:bg-muted">
-      <FileText className="size-4 shrink-0 text-muted-foreground" />
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-sm">{filename}</p>
-      </div>
-      {canPreview && (
-        <button
-          type="button"
-          className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-          title={t(($) => $.attachment.preview)}
-          aria-label={t(($) => $.attachment.preview)}
-          onClick={handlePreviewClick}
-        >
-          <Eye className="size-3.5" />
-        </button>
-      )}
-      {href && (
-        <button
-          type="button"
-          className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-          title={t(($) => $.image.download)}
-          aria-label={t(($) => $.image.download)}
-          onClick={handleDownloadClick}
-        >
-          <Download className="size-3.5" />
-        </button>
-      )}
-    </div>
-  );
-}
-
-function buildComponents(
-  resolveAttachmentId: (url: string) => string | undefined,
-  resolveAttachment: (url: string) => Attachment | undefined,
-  onDownload: (attachmentId: string) => void,
-  onPreview: (source: PreviewSource) => boolean,
-): Partial<Components> {
+function buildComponents(): Partial<Components> {
   return {
     // Links — route mention:// to mention components, others show preview card
     a: ReadonlyLink,
 
-    // Images — centered with toolbar + lightbox (matches Tiptap ImageView NodeView)
+    // Images — unified through <Attachment>. The resolver context provided
+    // by AttachmentDownloadProvider (mounted in ReadonlyContent below) turns
+    // a CDN URL into a full record when possible; external URLs render as
+    // plain images with lightbox-via-preview-modal. forceKind is mandatory
+    // here because markdown `![]()` carries no content-type and alt is
+    // commonly empty or descriptive — without it images fall through to
+    // the file-card chrome.
     img: ({ src, alt }) => (
-      <ReadonlyImage
-        src={typeof src === "string" ? src : undefined}
-        alt={alt ?? undefined}
-        resolveAttachmentId={resolveAttachmentId}
-        onDownload={onDownload}
+      <AttachmentRenderer
+        attachment={{
+          kind: "url",
+          url: typeof src === "string" ? src : "",
+          filename: alt ?? "",
+          forceKind: "image",
+        }}
       />
     ),
 
@@ -336,12 +331,8 @@ function buildComponents(
         const href = isAllowedFileCardHref(rawHref) ? rawHref : "";
         const filename = (node?.properties?.dataFilename as string) || "";
         return (
-          <ReadonlyFileCard
-            href={href}
-            filename={filename}
-            resolveAttachment={resolveAttachment}
-            onDownload={onDownload}
-            onPreview={onPreview}
+          <AttachmentRenderer
+            attachment={{ kind: "url", url: href, filename }}
           />
         );
       }
@@ -365,6 +356,13 @@ function buildComponents(
       if (isBlock && lang === "mermaid") {
         return <MermaidDiagram chart={String(children).replace(/\n$/, "")} />;
       }
+      if (isBlock && lang === "html") {
+        // Like Mermaid, return the React element directly here and rely on
+        // the `pre` renderer below to unwrap it — react-markdown otherwise
+        // wraps `code` children in a `<pre>` whose monospace + overflow
+        // styles would clamp the preview iframe.
+        return <HtmlBlockPreview html={String(children).replace(/\n$/, "")} />;
+      }
 
       if (!isBlock && !lang) {
         // Inline code — CSS handles styling via .rich-text-editor code
@@ -374,31 +372,50 @@ function buildComponents(
       // Block code — highlight with lowlight, output hljs classes
       const code = String(children).replace(/\n$/, "");
       try {
-        const tree = lang
-          ? lowlight.highlight(lang, code)
-          : lowlight.highlightAuto(code);
-        return (
-          <code
-            className={cn("hljs", lang && `language-${lang}`)}
-            dangerouslySetInnerHTML={{ __html: toHtml(tree) }}
-          />
-        );
+        const tree = highlightCode(code, lang);
+        const html = toHtml(tree);
+        if (html) {
+          return (
+            <code
+              className={cn("hljs", lang && `language-${lang}`)}
+              dangerouslySetInnerHTML={{ __html: html }}
+            />
+          );
+        }
       } catch {
-        // Fallback — render without highlighting
-        return (
-          <code className={className} {...props}>
-            {children}
-          </code>
-        );
+        // fall through to plain render
       }
+      return (
+        <code className={cn("hljs", className)} {...props}>
+          {children}
+        </code>
+      );
     },
 
-    // Pre — pass through (CSS handles styling via .rich-text-editor pre)
+    // Pre — wrap regular code fences with copy chrome.
+    // Special-case Mermaid / HtmlBlockPreview returned from the `code`
+    // renderer above so the outer `<pre>` does not wrap them — this is the
+    // standard two-layer pattern used to escape react-markdown's default
+    // `<pre><code>` envelope.
     pre: ({ children }) => {
-      if (isValidElement(children) && children.type === MermaidDiagram) {
-        return <>{children}</>;
+      // react-markdown calls `pre` BEFORE invoking the `code` renderer —
+      // `children` is the unrendered `<code>` element from the AST. So we
+      // identify "this block was meant to be unwrapped" by inspecting the
+      // child's className (`language-mermaid`, `language-html`), not by
+      // checking `children.type === MermaidDiagram`, which never matches.
+      //
+      // Match by exact class token: a substring `includes("language-html")`
+      // would also fire on neighboring languages like `language-htmlbars`
+      // and silently strip their <pre> wrapper.
+      let language: string | undefined;
+      if (isValidElement(children)) {
+        const childProps = children.props as { className?: string };
+        if (PRE_UNWRAP_RE.test(childProps.className ?? "")) {
+          return <>{children}</>;
+        }
+        language = /language-(\w+)/.exec(childProps.className ?? "")?.[1];
       }
-      return <pre>{children}</pre>;
+      return <ReadonlyCodeBlock language={language}>{children}</ReadonlyCodeBlock>;
     },
   };
 }
@@ -433,46 +450,52 @@ export const ReadonlyContent = memo(function ReadonlyContent({
   className,
   attachments,
 }: ReadonlyContentProps) {
-  const processed = useMemo(() => preprocessMarkdown(content), [content]);
+  const processed = useMemo(
+    () =>
+      highlightToHtml(
+        preprocessMarkdown(content, { autolinkIssueIdentifiers: true }),
+      ),
+    [content],
+  );
   const wrapperRef = useRef<HTMLDivElement>(null);
   const hover = useLinkHover(wrapperRef);
-  const download = useDownloadAttachment();
 
-  const resolveAttachmentId = useCallback(
-    (url: string): string | undefined => {
-      if (!url || !attachments?.length) return undefined;
-      return attachments.find((a) => a.url === url)?.id;
-    },
-    [attachments],
-  );
+  // Components map is now static — all attachment-aware logic lives in
+  // <Attachment>, which reads the surrounding AttachmentDownloadProvider.
+  const components = useMemo(() => buildComponents(), []);
 
-  const resolveAttachment = useCallback(
-    (url: string): Attachment | undefined => {
-      if (!url || !attachments?.length) return undefined;
-      return attachments.find((a) => a.url === url);
-    },
-    [attachments],
-  );
-
-  const preview = useAttachmentPreview();
-
-  const components = useMemo(
-    () => buildComponents(resolveAttachmentId, resolveAttachment, download, preview.tryOpen),
-    [resolveAttachmentId, resolveAttachment, download, preview.tryOpen],
-  );
-
-  return (
-    <div ref={wrapperRef} className={cn("rich-text-editor readonly text-sm", className)}>
+  // Memoize the whole react-markdown subtree on its only real inputs
+  // (`processed` + `components`). Unrelated parent re-renders (e.g. a sibling
+  // agent task streaming over WebSocket fires one every ~100ms) would otherwise
+  // re-run react-markdown, which hands `<code>` a fresh `dangerouslySetInnerHTML`
+  // object each time; React then rewrites the highlighted innerHTML even though
+  // the HTML string is byte-identical, tearing down and rebuilding every hljs
+  // <span> — which collapses any active text selection inside a code block
+  // (MUL-3621). A stable element reference lets React bail out of the subtree.
+  const markdown = useMemo(
+    () => (
       <ReactMarkdown
-        remarkPlugins={[remarkMath, remarkBreaks, [remarkGfm, { singleTilde: false }]]}
+        remarkPlugins={[
+          [remarkMath, { singleDollarTextMath: false }],
+          remarkBreaks,
+          [remarkGfm, { singleTilde: false }],
+        ]}
         rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema], rehypeKatex]}
         urlTransform={urlTransform}
         components={components}
       >
         {processed}
       </ReactMarkdown>
-      <LinkHoverCard {...hover} />
-      {preview.modal}
-    </div>
+    ),
+    [processed, components],
+  );
+
+  return (
+    <AttachmentDownloadProvider attachments={attachments}>
+      <div ref={wrapperRef} className={cn("rich-text-editor readonly text-sm", className)}>
+        {markdown}
+        <LinkHoverCard {...hover} />
+      </div>
+    </AttachmentDownloadProvider>
   );
 });

@@ -1,0 +1,57 @@
+{
+  "name": "multica",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-04-01",
+  "routes": [{ "pattern": "multica.maskzh.com", "custom_domain": true }],
+  // Serve Next.js static assets (/_next/static/*, /favicon.svg, /images/*)
+  // directly from CF's edge cache. Without this, every static file traverses
+  // gateway worker → service binding → multica-web worker → env.ASSETS, costing
+  // two worker invocations per file. With assets bound here, CF's asset layer
+  // intercepts matching paths before the worker runs and falls through to
+  // src/index.ts only for non-asset requests.
+  "assets": {
+    "directory": "../../apps/web/.open-next/assets"
+  },
+  "vars": {
+    "APP_ENV": "production",
+    "FRONTEND_ORIGIN": "https://multica.maskzh.com",
+    "CORS_ALLOWED_ORIGINS": "https://multica.maskzh.com",
+    "GOOGLE_REDIRECT_URI": "https://multica.maskzh.com/auth/callback",
+    "S3_BUCKET": "multica",
+    "S3_REGION": "auto",
+    "AWS_ENDPOINT_URL": "https://3f3c39381b33e26c98f39ec06d53b0d1.r2.cloudflarestorage.com",
+    "CLOUDFRONT_DOMAIN": "pub-f7b49defa74c47c38880a0746ca55828.r2.dev"
+  },
+  "services": [{ "binding": "FRONTEND_WORKER", "service": "multica-web" }],
+  "durable_objects": {
+    "bindings": [{ "name": "BACKEND", "class_name": "BackendContainer" }]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["BackendContainer"]
+    }
+  ],
+  "containers": [
+    {
+      "class_name": "BackendContainer",
+      "image": "../../Dockerfile",
+      "max_instances": 1
+    }
+  ],
+  "placement": {
+    "region": "gcp:asia-east1"
+  },
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true
+    }
+  },
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "0e931a474e924b11abd60b67e36bd002"
+    }
+  ]
+}

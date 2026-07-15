@@ -17,6 +17,7 @@ vi.mock("../platform", () => ({
 const {
   getAttachmentTextContentMock,
   downloadMock,
+  getBaseUrlMock,
   FakePreviewTooLargeError,
   FakePreviewUnsupportedError,
 } = vi.hoisted(() => {
@@ -35,13 +36,19 @@ const {
   return {
     getAttachmentTextContentMock: vi.fn(),
     downloadMock: vi.fn(),
+    // Default to the web shape (empty base, same-origin). Tests covering
+    // the desktop-renderer / standalone-shell case override per-test.
+    getBaseUrlMock: vi.fn(() => ""),
     FakePreviewTooLargeError,
     FakePreviewUnsupportedError,
   };
 });
 
 vi.mock("@multica/core/api", () => ({
-  api: { getAttachmentTextContent: getAttachmentTextContentMock },
+  api: {
+    getAttachmentTextContent: getAttachmentTextContentMock,
+    getBaseUrl: getBaseUrlMock,
+  },
   PreviewTooLargeError: FakePreviewTooLargeError,
   PreviewUnsupportedError: FakePreviewUnsupportedError,
 }));
@@ -49,6 +56,37 @@ vi.mock("@multica/core/api", () => ({
 vi.mock("./use-download-attachment", () => ({
   useDownloadAttachment: () => downloadMock,
 }));
+
+// Module-level flags toggled per-test: simulate desktop (openInNewTab
+// adapter present) vs web (omitted), and the no-slug case where the
+// modal sits outside a workspace route.
+const { openInNewTabMock, getShareableUrlMock, navState, slugState } =
+  vi.hoisted(() => ({
+    openInNewTabMock: vi.fn(),
+    getShareableUrlMock: vi.fn((p: string) => `https://app.example${p}`),
+    navState: { hasOpenInNewTab: true },
+    slugState: { value: "acme" as string | null },
+  }));
+
+vi.mock("../navigation", () => ({
+  useNavigation: () => ({
+    push: vi.fn(),
+    replace: vi.fn(),
+    back: vi.fn(),
+    pathname: "/acme/issues",
+    searchParams: new URLSearchParams(),
+    ...(navState.hasOpenInNewTab ? { openInNewTab: openInNewTabMock } : {}),
+    getShareableUrl: getShareableUrlMock,
+  }),
+}));
+
+vi.mock("@multica/core/paths", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@multica/core/paths")>();
+  return {
+    ...actual,
+    useWorkspaceSlug: () => slugState.value,
+  };
+});
 
 // ReadonlyContent has a heavy import surface (lowlight + KaTeX + Mermaid).
 // Stub it so the markdown dispatch test only verifies wiring.
@@ -71,6 +109,7 @@ vi.mock("../i18n", () => ({
           preview_unsupported: "This file type can't be previewed.",
           close: "Close",
           download_failed: "",
+          open_in_new_tab: "Open in new tab",
         },
       }),
   }),
@@ -104,6 +143,7 @@ function makeAttachment(overrides: Partial<Attachment> = {}): Attachment {
     filename: "test.bin",
     url: "https://cdn.example.test/att-1.bin",
     download_url: "https://cdn.example.test/att-1.bin?Signature=s",
+    markdown_url: "https://cdn.example.test/api/attachments/att-1/download",
     content_type: "application/octet-stream",
     size_bytes: 0,
     created_at: "2026-05-13T00:00:00Z",
@@ -113,6 +153,11 @@ function makeAttachment(overrides: Partial<Attachment> = {}): Attachment {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  navState.hasOpenInNewTab = true;
+  slugState.value = "acme";
+  // Default to web's same-origin empty base so existing absolute-URL tests
+  // remain unaffected by the relative-URL resolution added in normalize().
+  getBaseUrlMock.mockReturnValue("");
 });
 
 afterEach(() => {
@@ -120,6 +165,48 @@ afterEach(() => {
 });
 
 describe("AttachmentPreviewModal — dispatch", () => {
+  it("renders an <img> centered in the modal for image content types", () => {
+    const att = makeAttachment({ filename: "shot.png", content_type: "image/png" });
+    render(<AttachmentPreviewModal source={{ kind: "full", attachment: att }} open onClose={() => {}} />);
+    const img = document.querySelector("img");
+    expect(img).toBeTruthy();
+    expect(img?.getAttribute("src")).toBe(att.download_url);
+    expect(img?.getAttribute("alt")).toBe(att.filename);
+  });
+
+  it("falls back to durable media URLs when a full attachment has no download_url", () => {
+    const att = makeAttachment({
+      filename: "shot.png",
+      content_type: "image/png",
+      download_url: "",
+      markdown_url: "https://api.example.test/api/attachments/att-1/download",
+      url: "https://cdn.example.test/att-1.png?Signature=old",
+    });
+    render(
+      <AttachmentPreviewModal
+        source={{ kind: "full", attachment: att }}
+        open
+        onClose={() => {}}
+      />,
+    );
+    const img = document.querySelector("img");
+    expect(img?.getAttribute("src")).toBe(att.markdown_url);
+    expect(img?.getAttribute("src")).not.toContain("Signature=");
+  });
+
+  it("renders an <img> from a URL-only source for image filenames", () => {
+    const url = "https://cdn.example.test/orphan.png?Signature=s";
+    render(
+      <AttachmentPreviewModal
+        source={{ kind: "url", url, filename: "orphan.png" }}
+        open
+        onClose={() => {}}
+      />,
+    );
+    const img = document.querySelector("img");
+    expect(img?.getAttribute("src")).toBe(url);
+  });
+
   it("renders a PDF iframe pointing at the signed download URL", () => {
     const att = makeAttachment({ filename: "manual.pdf", content_type: "application/pdf" });
     render(<AttachmentPreviewModal source={{ kind: "full", attachment: att }} open onClose={() => {}} />);
@@ -159,7 +246,7 @@ describe("AttachmentPreviewModal — dispatch", () => {
     expect(screen.getByTestId("readonly-content").textContent).toContain("# heading");
   });
 
-  it("renders an iframe with srcdoc + sandbox='' for HTML", async () => {
+  it("renders an iframe with srcdoc + sandbox='allow-scripts' for HTML", async () => {
     getAttachmentTextContentMock.mockResolvedValueOnce({
       text: "<p>hi</p>",
       originalContentType: "text/html",
@@ -170,8 +257,15 @@ describe("AttachmentPreviewModal — dispatch", () => {
     await waitFor(() => {
       const frame = document.querySelector("iframe[sandbox]") as HTMLIFrameElement | null;
       expect(frame).toBeTruthy();
-      expect(frame?.getAttribute("sandbox")).toBe("");
-      expect(frame?.getAttribute("srcdoc")).toBe("<p>hi</p>");
+      // `allow-scripts` is required so vanilla-JS chart libraries render
+      // (MUL-2330). The combination with `allow-same-origin` would defeat
+      // the sandbox, so this assertion must stay exact.
+      expect(frame?.getAttribute("sandbox")).toBe("allow-scripts");
+      // srcdoc carries the original HTML plus the fragment-nav shim
+      // appended at the end (see utils/iframe-fragment-nav.ts).
+      const srcdoc = frame?.getAttribute("srcdoc") ?? "";
+      expect(srcdoc.startsWith("<p>hi</p>")).toBe(true);
+      expect(srcdoc).toContain("scrollIntoView");
     });
   });
 
@@ -194,6 +288,113 @@ describe("AttachmentPreviewModal — dispatch", () => {
     const att = makeAttachment({ filename: "blob.zip", content_type: "application/zip" });
     render(<AttachmentPreviewModal source={{ kind: "full", attachment: att }} open onClose={() => {}} />);
     expect(screen.getByText("This file type can't be previewed.")).toBeTruthy();
+  });
+});
+
+describe("AttachmentPreviewModal — server-relative download_url resolution (MUL-2976)", () => {
+  // The unified `/api/attachments/{id}/download` endpoint returns a
+  // server-relative path on non-CloudFront deployments. The web app keeps
+  // working same-origin because `apiBaseUrl=""`, but the desktop renderer
+  // is loaded from `app://` / file: / dev-server origin and needs the
+  // absolute URL — otherwise `<img src>`, `<iframe src>`, `<video src>`
+  // hit the shell origin and fail.
+  it("prefixes the configured API base for image previews when download_url is server-relative", () => {
+    getBaseUrlMock.mockReturnValue("https://api.example.test");
+    const att = makeAttachment({
+      filename: "shot.png",
+      content_type: "image/png",
+      download_url: "/api/attachments/att-1/download",
+    });
+    render(
+      <AttachmentPreviewModal
+        source={{ kind: "full", attachment: att }}
+        open
+        onClose={() => {}}
+      />,
+    );
+    const img = document.querySelector("img");
+    expect(img?.getAttribute("src")).toBe(
+      "https://api.example.test/api/attachments/att-1/download",
+    );
+  });
+
+  it("prefixes the configured API base for PDF previews when download_url is server-relative", () => {
+    getBaseUrlMock.mockReturnValue("https://api.example.test");
+    const att = makeAttachment({
+      filename: "manual.pdf",
+      content_type: "application/pdf",
+      download_url: "/api/attachments/att-1/download",
+    });
+    render(
+      <AttachmentPreviewModal
+        source={{ kind: "full", attachment: att }}
+        open
+        onClose={() => {}}
+      />,
+    );
+    const iframe = document.querySelector("iframe");
+    expect(iframe?.getAttribute("src")).toBe(
+      "https://api.example.test/api/attachments/att-1/download",
+    );
+  });
+
+  it("keeps a same-origin relative URL untouched when the configured base is empty (web)", () => {
+    // Default web shape — empty base. Browser resolves the relative path
+    // against the document origin, no prefix needed.
+    const att = makeAttachment({
+      filename: "shot.png",
+      content_type: "image/png",
+      download_url: "/api/attachments/att-1/download",
+    });
+    render(
+      <AttachmentPreviewModal
+        source={{ kind: "full", attachment: att }}
+        open
+        onClose={() => {}}
+      />,
+    );
+    const img = document.querySelector("img");
+    expect(img?.getAttribute("src")).toBe("/api/attachments/att-1/download");
+  });
+
+  it("trims a trailing slash on the configured base when joining a relative URL", () => {
+    getBaseUrlMock.mockReturnValue("https://api.example.test/");
+    const att = makeAttachment({
+      filename: "shot.png",
+      content_type: "image/png",
+      download_url: "/api/attachments/att-1/download",
+    });
+    render(
+      <AttachmentPreviewModal
+        source={{ kind: "full", attachment: att }}
+        open
+        onClose={() => {}}
+      />,
+    );
+    const img = document.querySelector("img");
+    expect(img?.getAttribute("src")).toBe(
+      "https://api.example.test/api/attachments/att-1/download",
+    );
+  });
+
+  it("passes an already-absolute CloudFront/presigned download_url through unchanged", () => {
+    getBaseUrlMock.mockReturnValue("https://api.example.test");
+    const att = makeAttachment({
+      filename: "shot.png",
+      content_type: "image/png",
+      download_url: "https://cdn.example.test/att-1.png?Signature=s",
+    });
+    render(
+      <AttachmentPreviewModal
+        source={{ kind: "full", attachment: att }}
+        open
+        onClose={() => {}}
+      />,
+    );
+    const img = document.querySelector("img");
+    expect(img?.getAttribute("src")).toBe(
+      "https://cdn.example.test/att-1.png?Signature=s",
+    );
   });
 });
 
@@ -312,6 +513,119 @@ describe("AttachmentPreviewModal — URL-only source", () => {
     fireEvent.click(button);
     expect(openExternalMock).toHaveBeenCalledWith(url);
     expect(downloadMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("AttachmentPreviewModal — open-in-new-tab (HTML only)", () => {
+  it("renders the open-in-new-tab button in the header for HTML attachments", async () => {
+    getAttachmentTextContentMock.mockResolvedValueOnce({
+      text: "<p>hi</p>",
+      originalContentType: "text/html",
+    });
+    const att = makeAttachment({
+      filename: "report.html",
+      content_type: "text/html",
+    });
+    render(
+      <AttachmentPreviewModal
+        source={{ kind: "full", attachment: att }}
+        open
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByTitle("Open in new tab")).toBeTruthy();
+  });
+
+  it("invokes navigation.openInNewTab with the preview path and closes the modal (desktop)", async () => {
+    getAttachmentTextContentMock.mockResolvedValueOnce({
+      text: "<p>hi</p>",
+      originalContentType: "text/html",
+    });
+    const att = makeAttachment({
+      filename: "report.html",
+      content_type: "text/html",
+    });
+    const onClose = vi.fn();
+    render(
+      <AttachmentPreviewModal
+        source={{ kind: "full", attachment: att }}
+        open
+        onClose={onClose}
+      />,
+    );
+    fireEvent.click(screen.getByTitle("Open in new tab"));
+    expect(openInNewTabMock).toHaveBeenCalledWith(
+      "/acme/attachments/att-1/preview?name=report.html",
+      "report.html",
+      { activate: true },
+    );
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to window.open against the shareable URL and closes the modal (web)", async () => {
+    navState.hasOpenInNewTab = false;
+    getAttachmentTextContentMock.mockResolvedValueOnce({
+      text: "<p>hi</p>",
+      originalContentType: "text/html",
+    });
+    const windowOpenSpy = vi
+      .spyOn(window, "open")
+      .mockImplementation(() => null);
+    const att = makeAttachment({
+      filename: "report.html",
+      content_type: "text/html",
+    });
+    const onClose = vi.fn();
+    render(
+      <AttachmentPreviewModal
+        source={{ kind: "full", attachment: att }}
+        open
+        onClose={onClose}
+      />,
+    );
+    fireEvent.click(screen.getByTitle("Open in new tab"));
+    expect(openInNewTabMock).not.toHaveBeenCalled();
+    expect(windowOpenSpy).toHaveBeenCalledWith(
+      "https://app.example/acme/attachments/att-1/preview?name=report.html",
+      "_blank",
+      "noopener,noreferrer",
+    );
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not render the new-tab button for non-HTML kinds", () => {
+    const att = makeAttachment({
+      filename: "manual.pdf",
+      content_type: "application/pdf",
+    });
+    render(
+      <AttachmentPreviewModal
+        source={{ kind: "full", attachment: att }}
+        open
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.queryByTitle("Open in new tab")).toBeNull();
+  });
+
+  it("does not render the new-tab button when there is no workspace slug", async () => {
+    slugState.value = null;
+    getAttachmentTextContentMock.mockResolvedValueOnce({
+      text: "<p>hi</p>",
+      originalContentType: "text/html",
+    });
+    const att = makeAttachment({
+      filename: "report.html",
+      content_type: "text/html",
+    });
+    render(
+      <AttachmentPreviewModal
+        source={{ kind: "full", attachment: att }}
+        open
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.queryByTitle("Open in new tab")).toBeNull();
   });
 });
 

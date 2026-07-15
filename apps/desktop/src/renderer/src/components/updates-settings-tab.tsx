@@ -1,6 +1,10 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AlertCircle, ArrowDownToLine, Check, Loader2 } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
+import { Switch } from "@multica/ui/components/ui/switch";
+import { useT } from "@multica/views/i18n";
+import { SettingsCard, SettingsRow, SettingsTab } from "@multica/views/settings";
+import { toast } from "sonner";
 
 type CheckState =
   | { status: "idle" }
@@ -10,8 +14,50 @@ type CheckState =
   | { status: "error"; message: string };
 
 export function UpdatesSettingsTab() {
+  const { t } = useT("settings");
   const [state, setState] = useState<CheckState>({ status: "idle" });
+  const [automaticUpdates, setAutomaticUpdates] = useState(true);
+  const [preferencesReady, setPreferencesReady] = useState(false);
+  const [savingPreference, setSavingPreference] = useState(false);
   const currentVersion = window.desktopAPI.appInfo.version;
+
+  useEffect(() => {
+    let mounted = true;
+    void window.updater
+      .getPreferences()
+      .then((preferences) => {
+        if (mounted) setAutomaticUpdates(preferences.automaticUpdates);
+      })
+      .catch(() => {
+        // The main process falls back to enabled when preferences cannot be
+        // read. Keep the same safe default if IPC itself becomes unavailable.
+      })
+      .finally(() => {
+        if (mounted) setPreferencesReady(true);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const handleAutomaticUpdatesChange = useCallback(
+    async (enabled: boolean) => {
+      setSavingPreference(true);
+      try {
+        const preferences = await window.updater.setAutomaticUpdates(enabled);
+        setAutomaticUpdates(preferences.automaticUpdates);
+        toast.success(t(($) => $.auto_save.toast_saved), {
+          id: "settings-auto-save",
+        });
+      } catch {
+        toast.error(t(($) => $.desktop.updates.automatic_updates_save_failed));
+      } finally {
+        setSavingPreference(false);
+      }
+    },
+    [t],
+  );
 
   const handleCheck = useCallback(async () => {
     setState({ status: "checking" });
@@ -28,71 +74,75 @@ export function UpdatesSettingsTab() {
   }, []);
 
   return (
-    <div>
-      <h2 className="text-lg font-semibold">Updates</h2>
-      <p className="text-sm text-muted-foreground mt-1">
-        The desktop app checks for new versions automatically once an hour and
-        shortly after launch, downloading them in the background. You&apos;ll
-        be prompted to restart once an update is ready.
-      </p>
+    <SettingsTab
+      title={t(($) => $.desktop.updates.title)}
+      description={t(($) => $.desktop.updates.description)}
+    >
+      <SettingsCard>
+        <SettingsRow label={t(($) => $.desktop.updates.current_version)}>
+          <span className="font-mono text-xs text-muted-foreground">
+            v{currentVersion}
+          </span>
+        </SettingsRow>
 
-      <div className="mt-6 divide-y">
-        <div className="flex items-center justify-between gap-6 py-4">
-          <div className="min-w-0">
-            <p className="text-sm font-medium">Current version</p>
-            <p className="text-sm text-muted-foreground mt-0.5 font-mono">
-              v{currentVersion}
-            </p>
-          </div>
-        </div>
+        <SettingsRow
+          label={t(($) => $.desktop.updates.automatic_updates_title)}
+          description={t(($) => $.desktop.updates.automatic_updates_description)}
+        >
+          <Switch
+            checked={automaticUpdates}
+            onCheckedChange={handleAutomaticUpdatesChange}
+            disabled={!preferencesReady || savingPreference}
+            aria-label={t(($) => $.desktop.updates.automatic_updates_title)}
+          />
+        </SettingsRow>
 
-        <div className="flex items-start justify-between gap-6 py-4">
-          <div className="min-w-0">
-            <p className="text-sm font-medium">Check for updates</p>
-            <p className="text-sm text-muted-foreground mt-0.5">
-              Trigger a check now instead of waiting for the next automatic
-              poll. Available updates download in the background and show a
-              restart prompt when ready.
-            </p>
-            {state.status === "up-to-date" && (
-              <p className="text-sm text-muted-foreground mt-2 inline-flex items-center gap-1.5">
-                <Check className="size-3.5 text-success" />
-                You&apos;re on the latest version.
-              </p>
-            )}
-            {state.status === "available" && (
-              <p className="text-sm text-muted-foreground mt-2 inline-flex items-center gap-1.5">
-                <ArrowDownToLine className="size-3.5 text-primary" />
-                v{state.latestVersion} is downloading in the background —
-                you&apos;ll be notified when it&apos;s ready to install.
-              </p>
-            )}
-            {state.status === "error" && (
-              <p className="text-sm text-destructive mt-2 inline-flex items-center gap-1.5">
-                <AlertCircle className="size-3.5" />
-                {state.message}
-              </p>
-            )}
-          </div>
-          <div className="shrink-0">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleCheck}
-              disabled={state.status === "checking"}
-            >
-              {state.status === "checking" ? (
-                <>
-                  <Loader2 className="size-3.5 animate-spin" />
-                  Checking…
-                </>
-              ) : (
-                "Check now"
+        <SettingsRow
+          label={t(($) => $.desktop.updates.check_section_title)}
+          align="start"
+          description={
+            <>
+              <p>{t(($) => $.desktop.updates.check_section_description)}</p>
+              {state.status === "up-to-date" && (
+                <p className="mt-2 inline-flex items-center gap-1.5">
+                  <Check className="size-3.5 text-success" />
+                  {t(($) => $.desktop.updates.up_to_date)}
+                </p>
               )}
-            </Button>
-          </div>
-        </div>
-      </div>
-    </div>
+              {state.status === "available" && (
+                <p className="mt-2 inline-flex items-center gap-1.5">
+                  <ArrowDownToLine className="size-3.5 text-primary" />
+                  {t(($) => $.desktop.updates.downloading, {
+                    version: state.latestVersion,
+                  })}
+                </p>
+              )}
+              {state.status === "error" && (
+                <p className="mt-2 inline-flex items-center gap-1.5 text-destructive">
+                  <AlertCircle className="size-3.5" />
+                  {state.message}
+                </p>
+              )}
+            </>
+          }
+        >
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleCheck}
+            disabled={state.status === "checking"}
+          >
+            {state.status === "checking" ? (
+              <>
+                <Loader2 className="size-3.5 animate-spin" />
+                {t(($) => $.desktop.updates.checking)}
+              </>
+            ) : (
+              t(($) => $.desktop.updates.check_now)
+            )}
+          </Button>
+        </SettingsRow>
+      </SettingsCard>
+    </SettingsTab>
   );
 }

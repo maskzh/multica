@@ -1,16 +1,28 @@
-export type { Issue, IssueStatus, IssuePriority, IssueAssigneeType, IssueReaction } from "./issue";
+export type { Issue, IssueStatus, IssuePriority, IssueAssigneeType, IssueMetadata, IssueMetadataValue, IssueReaction } from "./issue";
 export type {
   Agent,
   AgentStatus,
   AgentRuntimeMode,
   AgentVisibility,
+  AgentPermissionMode,
+  AgentInvocationTarget,
+  AgentInvocationTargetInput,
   AgentTask,
+  TaskAttribution,
+  AttributionUser,
+  TaskEvidence,
   AgentActivityBucket,
   AgentRunCount,
   TaskFailureReason,
   AgentRuntime,
   RuntimeDevice,
+  RuntimeProfile,
+  RuntimeProtocolFamily,
+  RuntimeProfileVisibility,
+  CreateRuntimeProfileRequest,
+  UpdateRuntimeProfileRequest,
   CreateAgentRequest,
+  AgentBuilderSession,
   AgentTemplate,
   AgentTemplateSummary,
   AgentTemplateSkillRef,
@@ -18,6 +30,8 @@ export type {
   CreateAgentFromTemplateResponse,
   CreateAgentFromTemplateFailure,
   UpdateAgentRequest,
+  AgentEnvResponse,
+  UpdateAgentEnvRequest,
   Skill,
   SkillSummary,
   AgentSkillSummary,
@@ -36,11 +50,16 @@ export type {
   RuntimeUpdate,
   RuntimeUpdateStatus,
   RuntimeModel,
+  RuntimeModelThinking,
+  RuntimeModelThinkingLevel,
   RuntimeModelListRequest,
   RuntimeModelListStatus,
   RuntimeModelsResult,
   RuntimeLocalSkillStatus,
+  RuntimeLocalSkillImportAction,
+  RuntimeLocalSkillImportConflict,
   RuntimeLocalSkillSummary,
+	RuntimeLocalMcpServerSummary,
   RuntimeLocalSkillListRequest,
   CreateRuntimeLocalSkillImportRequest,
   RuntimeLocalSkillImportRequest,
@@ -48,11 +67,14 @@ export type {
   RuntimeLocalSkillImportResult,
   IssueUsageSummary,
 } from "./agent";
+export { RUNTIME_PROFILE_PROTOCOL_FAMILIES } from "./agent";
 export type { Workspace, WorkspaceRepo, Member, MemberRole, User, MemberWithUser, Invitation } from "./workspace";
-export type { InboxItem, InboxSeverity, InboxItemType } from "./inbox";
+export type { InboxItem, InboxSeverity, InboxItemType, InboxWorkspaceUnread } from "./inbox";
 export type { NotificationGroupKey, NotificationGroupValue, NotificationPreferences, NotificationPreferenceResponse } from "./notification-preference";
-export type { Comment, CommentType, CommentAuthorType, Reaction } from "./comment";
-export type { Label, CreateLabelRequest, UpdateLabelRequest, ListLabelsResponse, IssueLabelsResponse } from "./label";
+export type { Comment, CommentType, CommentAuthorType, CommentTriggerPreview, CommentTriggerPreviewAgent, CommentTriggerSource, CommentTriggerOutcome, CommentTriggerStatus, Reaction } from "./comment";
+export type { Label, LabelResourceType, CreateLabelRequest, UpdateLabelRequest, ListLabelsResponse, IssueLabelsResponse, ResourceLabelsResponse } from "./label";
+export type { IssueProperty, IssuePropertyType, IssuePropertyOption, IssuePropertyConfig, IssuePropertyValue, IssuePropertyValues, CreatePropertyRequest, UpdatePropertyRequest, ListPropertiesResponse, IssuePropertiesResponse } from "./property";
+export { ISSUE_PROPERTY_TYPES, isKnownPropertyType } from "./property";
 export type {
   TimelineEntry,
   AssigneeFrequencyEntry,
@@ -61,7 +83,23 @@ export type { IssueSubscriber } from "./subscriber";
 export type * from "./events";
 export type * from "./api";
 export type { Attachment } from "./attachment";
-export type { ChatSession, ChatMessage, ChatPendingTask, PendingChatTaskItem, PendingChatTasksResponse, SendChatMessageResponse } from "./chat";
+export { attachmentDownloadPath, attachmentIdFromDownloadURL, contentReferencesAttachment } from "./attachment-url";
+export type {
+  ChatSession,
+  ChatLastMessage,
+  ChatPinnedAgent,
+  ChatMessage,
+  ChatMessagesPage,
+  ChatPendingTask,
+  PendingChatTaskItem,
+  PendingChatTasksResponse,
+  HasPendingChatTasksResponse,
+  SendChatMessageResponse,
+  CancelledChatMessage,
+  CancelTaskResponse,
+  ChatDraftRestore,
+  ChatDraftRestoresResponse,
+} from "./chat";
 export type { StorageAdapter } from "./storage";
 export type {
   Project,
@@ -72,8 +110,11 @@ export type {
   ListProjectsResponse,
   ProjectResource,
   ProjectResourceType,
+  ProjectResourceRef,
   GithubRepoResourceRef,
+  LocalDirectoryResourceRef,
   CreateProjectResourceRequest,
+  UpdateProjectResourceRequest,
   ListProjectResourcesResponse,
 } from "./project";
 export type { PinnedItem, PinnedItemType, CreatePinRequest, ReorderPinsRequest } from "./pin";
@@ -87,14 +128,38 @@ export type {
   GitHubConnectResponse,
 } from "./github";
 export type {
+  LarkInstallation,
+  ListLarkInstallationsResponse,
+  BeginLarkInstallResponse,
+  LarkInstallStatusResponse,
+  RedeemLarkBindingTokenResponse,
+} from "./lark";
+export type {
+  ComposioToolkit,
+  ComposioConnection,
+  ComposioConnectInitResponse,
+} from "./composio";
+export type {
+  SlackInstallation,
+  ListSlackInstallationsResponse,
+  RegisterSlackBYORequest,
+  RedeemSlackBindingTokenResponse,
+} from "./slack";
+export type {
   Autopilot,
   AutopilotStatus,
   AutopilotExecutionMode,
+  AutopilotAssigneeType,
+  AutopilotSubscriber,
+  AutopilotSubscriberInput,
+  AutopilotCollaborator,
+  AutopilotCollaboratorsResponse,
   AutopilotTrigger,
   AutopilotTriggerKind,
   AutopilotRun,
   AutopilotRunStatus,
   AutopilotRunSource,
+  WebhookEventFilter,
   CreateAutopilotRequest,
   UpdateAutopilotRequest,
   CreateAutopilotTriggerRequest,
@@ -102,11 +167,16 @@ export type {
   ListAutopilotsResponse,
   GetAutopilotResponse,
   ListAutopilotRunsResponse,
+  WebhookDelivery,
+  WebhookDeliveryStatus,
+  WebhookSignatureStatus,
+  ListWebhookDeliveriesResponse,
 } from "./autopilot";
 export type {
   Squad,
   SquadMember,
   SquadMemberType,
+  SquadMemberPreview,
   SquadActivityLog,
   SquadActivityOutcome,
   CreateSquadRequest,
@@ -115,4 +185,26 @@ export type {
   RemoveSquadMemberRequest,
   UpdateSquadMemberRoleRequest,
   CreateSquadActivityLogRequest,
+  SquadMemberStatusValue,
+  SquadActiveIssueBrief,
+  SquadMemberStatus,
+  SquadMemberStatusListResponse,
 } from "./squad";
+export type {
+  BillingBalance,
+  BillingTransaction,
+  BillingTransactionsPage,
+  BillingTxType,
+  BillingTxSource,
+  BillingBatch,
+  BillingBatchesPage,
+  BillingBatchSourceType,
+  BillingTopup,
+  BillingTopupsPage,
+  BillingTopupStatus,
+  BillingPriceTier,
+  CreateBillingCheckoutSessionRequest,
+  CreateBillingCheckoutSessionResponse,
+  BillingCheckoutSessionStatus,
+  CreateBillingPortalSessionResponse,
+} from "./billing";

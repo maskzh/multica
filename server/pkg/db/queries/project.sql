@@ -16,9 +16,9 @@ WHERE id = $1 AND workspace_id = $2;
 -- name: CreateProject :one
 INSERT INTO project (
     workspace_id, title, description, icon, status,
-    lead_type, lead_id, priority
+    lead_type, lead_id, priority, start_date, due_date
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
 ) RETURNING *;
 
 -- name: UpdateProject :one
@@ -30,12 +30,15 @@ UPDATE project SET
     priority = COALESCE(sqlc.narg('priority'), priority),
     lead_type = sqlc.narg('lead_type'),
     lead_id = sqlc.narg('lead_id'),
+    start_date = sqlc.narg('start_date'),
+    due_date = sqlc.narg('due_date'),
     updated_at = now()
 WHERE id = $1
 RETURNING *;
 
 -- name: DeleteProject :exec
-DELETE FROM project WHERE id = $1;
+-- Defense-in-depth: workspace_id is a SQL-layer tenant guard. See DeleteIssue.
+DELETE FROM project WHERE id = $1 AND workspace_id = $2;
 
 -- name: CountIssuesByProject :one
 SELECT count(*) FROM issue

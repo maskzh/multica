@@ -1,9 +1,13 @@
 import React from "react";
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { renderWithI18n } from "../test/i18n";
 
 const longRepoUrl =
   "https://github.com/multica-ai/a-very-long-repository-name-that-needs-a-tooltip";
+const apiRepoUrl = "https://github.com/multica-ai/api";
+const webRepoUrl = "https://github.com/multica-ai/web";
 
 vi.mock("@tanstack/react-query", () => ({
   useQuery: () => ({ data: [] }),
@@ -39,7 +43,7 @@ vi.mock("@multica/core/paths", () => ({
     id: "workspace-1",
     name: "Test Workspace",
     slug: "test-workspace",
-    repos: [{ url: longRepoUrl }],
+    repos: [{ url: longRepoUrl }, { url: apiRepoUrl }, { url: webRepoUrl }],
   }),
   useWorkspacePaths: () => ({
     projectDetail: (id: string) => `/test-workspace/projects/${id}`,
@@ -83,6 +87,17 @@ vi.mock("../issues/components/priority-icon", () => ({
 
 vi.mock("../common/actor-avatar", () => ({
   ActorAvatar: () => <span data-testid="actor-avatar" />,
+}));
+
+// Stub the date pickers so this test doesn't pull the real Calendar (and its
+// buttonVariants import) into the modal's module graph; the pickers have their
+// own test. The stubs render the placeholder label so the pills are assertable.
+vi.mock("../projects/components/project-start-date-picker", () => ({
+  ProjectStartDatePicker: () => <button type="button">Start date</button>,
+}));
+
+vi.mock("../projects/components/project-due-date-picker", () => ({
+  ProjectDueDatePicker: () => <button type="button">Due date</button>,
 }));
 
 vi.mock("@multica/ui/components/ui/dialog", () => ({
@@ -164,5 +179,45 @@ describe("CreateProjectModal", () => {
 
     expect(screen.getByTitle(longRepoUrl)).toHaveTextContent(longRepoUrl);
     expect(screen.getByRole("tooltip", { name: longRepoUrl })).toBeInTheDocument();
+  });
+
+  it("reveals the start/due date pickers from the ⋯ overflow menu", async () => {
+    const user = userEvent.setup();
+    renderWithI18n(<CreateProjectModal onClose={vi.fn()} />);
+
+    // Dates are collapsed behind the overflow by default (progressive disclosure).
+    expect(screen.queryByRole("button", { name: "Start date" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Due date" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Set start date/ }));
+    expect(screen.getByRole("button", { name: "Start date" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Set due date/ }));
+    expect(screen.getByRole("button", { name: "Due date" })).toBeInTheDocument();
+  });
+
+  it("filters workspace repositories by search text", async () => {
+    const user = userEvent.setup();
+
+    renderWithI18n(<CreateProjectModal onClose={vi.fn()} />);
+
+    const repoSearchInput = screen.getByRole("textbox", { name: "Search repositories..." });
+
+    await user.type(repoSearchInput, "api");
+
+    expect(
+      screen.getByRole("button", { name: (name) => name.includes(apiRepoUrl) }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: (name) => name.includes(webRepoUrl) }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: (name) => name.includes(longRepoUrl) }),
+    ).not.toBeInTheDocument();
+
+    await user.clear(repoSearchInput);
+    await user.type(repoSearchInput, "no-match");
+
+    expect(screen.getByText("No repositories match your search.")).toBeInTheDocument();
   });
 });
